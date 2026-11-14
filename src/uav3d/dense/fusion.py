@@ -280,14 +280,70 @@ def write_ply(
     return dest
 
 
-def write_obj(path: str | Path, vertices: np.ndarray, faces: np.ndarray) -> Path:
-    """Write a triangle mesh as Wavefront OBJ."""
+def write_obj(
+    path: str | Path,
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    colors: np.ndarray | None = None,
+    normals: np.ndarray | None = None,
+) -> Path:
+    """Write a triangle mesh as Wavefront OBJ, with optional vertex colour/normals.
+
+    Colour is written as per-vertex RGB on the ``v`` lines, which is the form
+    MeshLab, Blender and CloudCompare all read. Without it a viewer falls back
+    to a single flat default material and the model renders as one solid blob,
+    which hides every bit of real surface detail the reconstruction captured.
+    """
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    n = vertices.shape[0]
+    use_color = colors is not None and colors.shape[0] == n
+    use_normals = normals is not None and normals.shape[0] == n
     with open(dest, "w", encoding="ascii") as fh:
         fh.write("# uav3d dense reconstruction\n")
-        for p in vertices:
-            fh.write(f"v {p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+        if use_color:
+            fh.write("# vertex colours are RGB in 0..1 on the v lines\n")
+        for i, p in enumerate(vertices):
+            if use_color:
+                c = colors[i]
+                fh.write(
+                    f"v {p[0]:.6f} {p[1]:.6f} {p[2]:.6f} "
+                    f"{c[0]:.4f} {c[1]:.4f} {c[2]:.4f}\n"
+                )
+            else:
+                fh.write(f"v {p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+        if use_normals:
+            for nv in normals:
+                fh.write(f"vn {nv[0]:.6f} {nv[1]:.6f} {nv[2]:.6f}\n")
         for f in faces:
-            fh.write(f"f {f[0] + 1} {f[1] + 1} {f[2] + 1}\n")
+            a, b, c = int(f[0]) + 1, int(f[1]) + 1, int(f[2]) + 1
+            if use_normals:
+                fh.write(f"f {a}//{a} {b}//{b} {c}//{c}\n")
+            else:
+                fh.write(f"f {a} {b} {c}\n")
     return dest
+
+
+def transfer_vertex_colors(
+    mesh_vertices: np.ndarray,
+    cloud_points: np.ndarray,
+    cloud_colors: np.ndarray,
+    k: int = 4,
+) -> np.ndarray:
+    """Give every mesh vertex the colour of its nearest cloud points.
+
+    The mesh is extracted from the same fused points, so a nearest-neighbour
+    lookup reproduces the captured colour almost exactly. Averaging the ``k``
+    nearest points smooths the seams between contributing views instead of
+    picking one view's exposure.
+    """
+    if cloud_points.shape[0] == 0 or mesh_vertices.shape[0] == 0:
+        return np.full((mesh_vertices.shape[0], 3), 0.5, dtype=np.float64)
+    from scipy.spatial import cKDTree
+
+    k = int(max(1, min(k, cloud_points.shape[0])))
+    tree = cKDTree(cloud_points)
+    _, idx = tree.query(mesh_vertices, k=k, workers=-1)
+    if k == 1:
+        idx = idx[:, None]
+    return np.clip(cloud_colors[idx].mean(axis=1), 0.0, 1.0)

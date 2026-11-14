@@ -40,6 +40,7 @@ from uav3d.dense.fusion import (
     backproject_view,
     depth_normals,
     filter_density,
+    transfer_vertex_colors,
     write_obj,
     write_ply,
 )
@@ -53,6 +54,7 @@ from uav3d.dense.geometry import (
     umeyama_similarity,
     write_sparse_points,
 )
+from uav3d.dense.glb_export import write_glb
 from uav3d.dense.mesh import (
     filter_unobserved_faces,
     orient_faces,
@@ -65,7 +67,12 @@ from uav3d.dense.sweep import (
     apply_uncertainty_gate,
     estimate_depth,
 )
-from uav3d.dense.views import median_baseline, median_depth_of, rank_sources, SourceSelection
+from uav3d.dense.views import (
+    SourceSelection,
+    median_baseline,
+    median_depth_of,
+    rank_sources,
+)
 from uav3d.exceptions import DataError, PipelineError
 from uav3d.models.dense import (
     DenseDepthSummary,
@@ -553,6 +560,7 @@ def run_dense(
 
     # --- 7. meshing --------------------------------------------------------
     mesh_path: Path | None = None
+    glb_path: Path | None = None
     mesh_summary: DenseMeshSummary | None = None
     t0 = time.time()
     if config.mesh and normals is not None and points.shape[0] >= 5000:
@@ -580,7 +588,23 @@ def run_dense(
             centres = np.array([v.center for v in views], dtype=np.float64)
             mesh = filter_unobserved_faces(mesh, centres)
             mesh = weld_vertices(mesh, tolerance=voxel_units * 1e-3)
-            mesh_path = write_obj(out_dir / "mesh.obj", mesh.vertices, mesh.faces)
+            # Colour the mesh from the fused cloud so the export carries the
+            # captured surface appearance instead of one flat default material.
+            mesh_colors = transfer_vertex_colors(mesh.vertices, points, colors)
+            mesh_path = write_obj(
+                out_dir / "mesh.obj", mesh.vertices, mesh.faces, mesh_colors
+            )
+            # Also emit a GLB with normals and a material. trimesh's exporter
+            # omits NORMAL when the mesh has none, which makes every viewer
+            # shade the surface flat and unreadable.
+            glb_path = write_glb(
+                out_dir / "mesh.glb",
+                mesh.vertices,
+                mesh.faces,
+                mesh_colors,
+                name="dense_mesh",
+            )
+            logger.info("[mesh] wrote %s", glb_path)
             mesh_summary = DenseMeshSummary(
                 num_vertices=mesh.num_vertices,
                 num_faces=mesh.num_faces,
@@ -610,6 +634,8 @@ def run_dense(
     artifacts = {"cloud": str(cloud_path)}
     if mesh_path is not None:
         artifacts["mesh"] = str(mesh_path)
+    if glb_path is not None:
+        artifacts["glb"] = str(glb_path)
     report = DenseReport(
         run_dir=str(run_path),
         dataset_label=poses.dataset_label,
