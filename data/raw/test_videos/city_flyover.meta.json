@@ -1,0 +1,12 @@
+{
+  "frames": 600,
+  "width": 1280,
+  "height": 720,
+  "fps": 30.0,
+  "focal_px": 1152.0,
+  "focal_ratio": 0.9,
+  "seed": 20260922,
+  "flight": "single pass along +x, x=-100..+100 m, 44-56 m AGL, ~38 deg oblique down, gentle weave",
+  "straight": false,
+  "gt_points": 156648
+}
