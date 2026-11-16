@@ -1,0 +1,78 @@
+{
+  "recon": "data\\outputs\\run_20261113_055317\\dense_v2\\mesh.obj",
+  "gt": "data\\raw\\test_videos\\city_flyover.gt_model.ply",
+  "recon_points": 100000,
+  "gt_points_total": 100000,
+  "gt_points_scored": 30364,
+  "crop": {
+    "minimum": [
+      -87.951,
+      -32.7877,
+      -37.7252
+    ],
+    "maximum": [
+      61.6526,
+      7.9735,
+      53.5965
+    ],
+    "extent": [
+      149.6036,
+      40.7612,
+      91.3217
+    ],
+    "fraction_kept": 0.3036
+  },
+  "alignment": {
+    "source": "trajectory",
+    "scale_meters_per_unit": 6.75883,
+    "rotation_index": -1,
+    "camera_median_residual_m": 0.034751,
+    "rotation": [
+      [
+        0.127382,
+        -0.790907,
+        0.598532
+      ],
+      [
+        -0.039755,
+        0.598892,
+        0.799843
+      ],
+      [
+        -0.991057,
+        -0.125681,
+        0.044846
+      ]
+    ],
+    "translation": [
+      -58.3588,
+      -54.5025,
+      7.4685
+    ]
+  },
+  "metrics": {
+    "chamfer": 3.6699,
+    "chamfer_median": 1.6892,
+    "chamfer_rmse": 4.3242,
+    "accuracy_median": 1.5988,
+    "completeness_median": 3.2933,
+    "precision_at_0.05": 0.0001,
+    "completeness_at_0.05": 0.0003,
+    "fscore_at_0.05": 0.0001,
+    "precision_at_0.1": 0.0008,
+    "completeness_at_0.1": 0.0024,
+    "fscore_at_0.1": 0.0011,
+    "precision_at_0.2": 0.0065,
+    "completeness_at_0.2": 0.0198,
+    "fscore_at_0.2": 0.0098,
+    "precision_at_0.5": 0.0835,
+    "completeness_at_0.5": 0.1681,
+    "fscore_at_0.5": 0.1116,
+    "precision_at_1": 0.3027,
+    "completeness_at_1": 0.3527,
+    "fscore_at_1": 0.3258,
+    "precision_at_2": 0.6235,
+    "completeness_at_2": 0.4276,
+    "fscore_at_2": 0.5073
+  }
+}

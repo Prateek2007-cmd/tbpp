@@ -17,7 +17,12 @@ logger = logging.getLogger("uav3d.sources.video")
 class VideoFileSource(ImageSource):
     """Ingestion source for video files (e.g. MP4, AVI, MOV) using OpenCV."""
 
-    def __init__(self, video_path: str | Path) -> None:
+    def __init__(
+        self,
+        video_path: str | Path,
+        start_frame: int = 0,
+        end_frame: int | None = None,
+    ) -> None:
         self.video_path = Path(video_path).resolve()
         if not self.video_path.exists():
             raise DataError(f"Video file does not exist: {self.video_path}")
@@ -34,18 +39,34 @@ class VideoFileSource(ImageSource):
         finally:
             cap.release()
 
+        if self._frame_count > 0:
+            if start_frame < 0 or start_frame >= self._frame_count:
+                raise DataError(
+                    f"start_frame {start_frame} outside video range 0..{self._frame_count - 1}"
+                )
+            end = self._frame_count if end_frame is None else int(end_frame)
+            end = min(end, self._frame_count)
+            if end <= start_frame:
+                raise DataError(f"end_frame {end} must be greater than start_frame {start_frame}")
+            self._start_frame = int(start_frame)
+            self._end_frame = end
+        else:
+            self._start_frame = 0
+            self._end_frame = None
+
         self._frame_cache: dict[str, FrameRecord] = {}
 
     def metadata(self) -> SourceMetadata:
-        """Return metadata summary for the video."""
-        first_id = "video_000000" if self._frame_count > 0 else None
-        last_id = f"video_{max(0, self._frame_count - 1):06d}" if self._frame_count > 0 else None
-        first_ts = 0 if self._frame_count > 0 else None
-        last_ts = int(((self._frame_count - 1) / self._fps) * 1_000_000) if self._frame_count > 0 else None
+        """Return metadata summary for the video (respecting the requested frame range)."""
+        count = self._end_frame - self._start_frame
+        first_id = f"video_{self._start_frame:06d}" if count > 0 else None
+        last_id = f"video_{self._end_frame - 1:06d}" if count > 0 else None
+        first_ts = int((self._start_frame / self._fps) * 1_000_000) if count > 0 else None
+        last_ts = int(((self._end_frame - 1) / self._fps) * 1_000_000) if count > 0 else None
 
         return SourceMetadata(
             name=self.video_path.name,
-            frame_count=self._frame_count,
+            frame_count=count,
             fps=round(self._fps, 2),
             width=self._width,
             height=self._height,
@@ -76,8 +97,10 @@ class VideoFileSource(ImageSource):
             raise DataError(f"Could not open video file: {self.video_path}")
 
         try:
-            frame_idx = 0
-            while True:
+            if self._start_frame > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, float(self._start_frame))
+            frame_idx = self._start_frame
+            while self._end_frame is None or frame_idx < self._end_frame:
                 # Retrieve current position timestamp in milliseconds before grabbing
                 pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
                 ret = cap.grab()
@@ -115,8 +138,12 @@ class VideoFileSource(ImageSource):
             raise Uav3dError(f"Invalid frame_id format: '{frame_id}'")
 
         idx = int(match.group(1))
-        if idx < 0 or idx >= self._frame_count:
-            raise DataError(f"Frame index {idx} out of range (total: {self._frame_count})")
+        end = self._end_frame if self._end_frame is not None else self._frame_count
+        if idx < self._start_frame or idx >= end:
+            raise DataError(
+                f"Frame index {idx} outside selected range "
+                f"{self._start_frame}..{max(self._start_frame, end - 1)} (total: {self._frame_count})"
+            )
 
         pts_us = int((idx / self._fps) * 1_000_000)
         record = FrameRecord(

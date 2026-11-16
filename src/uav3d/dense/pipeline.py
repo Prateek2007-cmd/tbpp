@@ -45,6 +45,7 @@ from uav3d.dense.fusion import (
     write_ply,
 )
 from uav3d.dense.geometry import (
+    clamp_near_for_plane_budget,
     depth_noise_sigma,
     depth_planes,
     load_sparse_points,
@@ -60,6 +61,12 @@ from uav3d.dense.mesh import (
     orient_faces,
     reconstruct_mesh,
     weld_vertices,
+)
+from uav3d.dense.prior import (
+    MonocularPriorModel,
+    build_prior,
+    edge_mask,
+    fill_from_prior,
 )
 from uav3d.dense.sweep import (
     DepthEstimate,
@@ -79,6 +86,7 @@ from uav3d.models.dense import (
     DenseFusionSummary,
     DenseGeometrySummary,
     DenseMeshSummary,
+    DensePriorSummary,
     DenseReport,
     DenseScaleSummary,
 )
@@ -259,6 +267,7 @@ def _per_view_ranges(
                 config.depth_percentile_low,
                 config.depth_percentile_high,
                 config.depth_margin,
+                config.depth_near_min_ratio,
             )
             ranges[index] = (near, far)
             medians[index] = median
@@ -290,7 +299,9 @@ def _global_depth_range(
         raise DataError("Sparse points do not project into the image; cannot derive a depth range")
     lo = float(np.percentile(zz, config.depth_percentile_low)) * (1.0 - config.depth_margin)
     hi = float(np.percentile(zz, config.depth_percentile_high)) * (1.0 + config.depth_margin)
-    return max(lo, 1e-6), max(hi, lo * 1.2), float(np.median(zz))
+    median = float(np.median(zz))
+    lo = max(lo, float(config.depth_near_min_ratio) * median)
+    return max(lo, 1e-6), max(hi, lo * 1.2), max(median, 1e-6)
 
 
 def _select_sources(
@@ -410,6 +421,99 @@ def run_dense(
             ratio,
         )
 
+    # --- 2b. monocular prior prepass (opt-in) ------------------------------
+    # A failure here must never fail the run: the prior is an additive fill, so
+    # any problem degrades to "no prior" with a warning.
+    prior_maps: dict[int, np.ndarray] = {}
+    prior_summary: DensePriorSummary | None = None
+    if config.prior_enabled:
+        t0 = time.time()
+        if sparse_points is None:
+            logger.warning(
+                "Depth prior enabled but no sparse SfM points are available; the prior "
+                "cannot be aligned to the SfM frame and is being skipped"
+            )
+        else:
+            try:
+                prior_model = MonocularPriorModel(
+                    config.prior_model_path,
+                    infer_height=config.prior_infer_height,
+                )
+            except Exception as exc:  # noqa: BLE001 - the prior must never fail the run
+                logger.warning("Depth prior unavailable (%s); continuing without it", exc)
+            else:
+                per_view: dict[str, dict[str, float | bool | None]] = {}
+                for index in usable:
+                    near, far = ranges[index]
+                    try:
+                        depth, _scale, _shift, corr, err, inverted = build_prior(
+                            prior_model,
+                            views[index],
+                            images.get(index),
+                            sparse_points,
+                            near,
+                            far,
+                            min_rank_corr=config.prior_min_rank_corr,
+                            max_relative_error=config.prior_max_relative_error,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Prior failed for view %s: %s", views[index].frame_id, exc)
+                        continue
+                    accepted = bool(np.any(depth > 0.0) and np.isfinite(err))
+                    if accepted:
+                        prior_maps[index] = depth
+                    per_view[views[index].frame_id] = {
+                        "accepted": accepted,
+                        "corr": float(corr) if np.isfinite(corr) else None,
+                        "error": float(err) if np.isfinite(err) else None,
+                        "inverted": bool(inverted),
+                    }
+                accepted_views = [m for m in per_view.values() if m["accepted"]]
+                prior_report = {
+                    "model": str(config.prior_model_path),
+                    "views_total": len(usable),
+                    "views_accepted": len(prior_maps),
+                    "median_corr": (
+                        float(np.median([m["corr"] for m in accepted_views]))
+                        if accepted_views
+                        else None
+                    ),
+                    "median_error": (
+                        float(np.median([m["error"] for m in accepted_views]))
+                        if accepted_views
+                        else None
+                    ),
+                    "views": per_view,
+                }
+                prior_path = out_dir / "prior_report.json"
+                prior_path.write_text(json.dumps(prior_report, indent=2), encoding="utf-8")
+                prior_summary = DensePriorSummary(
+                    enabled=True,
+                    model_path=str(config.prior_model_path),
+                    views_total=len(usable),
+                    views_accepted=len(prior_maps),
+                    median_corr=prior_report["median_corr"],
+                    median_error=prior_report["median_error"],
+                )
+                stage_seconds["prior"] = time.time() - t0
+                if not prior_maps:
+                    logger.warning(
+                        "Depth prior accepted no views (min_rank_corr=%.2f, "
+                        "max_relative_error=%.2f); continuing without prior fill. "
+                        "Details in %s",
+                        config.prior_min_rank_corr,
+                        config.prior_max_relative_error,
+                        prior_path,
+                    )
+                else:
+                    logger.info(
+                        "Depth prior accepted %d/%d views (median corr %.3f, error %.3f)",
+                        len(prior_maps),
+                        len(usable),
+                        prior_report["median_corr"],
+                        prior_report["median_error"],
+                    )
+
     # --- 3. plane-sweep MVS ------------------------------------------------
     t0 = time.time()
     depth_dir = out_dir / "depth"
@@ -419,12 +523,37 @@ def run_dense(
     cost_samples: list[float] = []
     plane_counts: list[int] = []
     runtime_per_view: list[float] = []
+    depth_limits: dict[int, tuple[float, float]] = {}
 
     for order, index in enumerate(usable):
         nearest, farthest = ranges[index]
         chosen = selections[index]
         baselines = [float(np.linalg.norm(views[index].center - views[s.index].center)) for s in chosen]
         baseline = float(np.median(baselines)) if baselines else median_base
+        clamped = clamp_near_for_plane_budget(
+            nearest,
+            farthest,
+            intrinsics.focal,
+            baseline,
+            config.plane_step_px,
+            config.max_planes,
+            relax=config.depth_near_plane_relax,
+        )
+        if clamped > nearest * (1.0 + 1e-4):
+            logger.warning(
+                "View %s: depth range [%.3f, %.3f] needs more than %d planes at "
+                "%.2f px step; raising near to %.3f so the sweep keeps its step.",
+                views[index].frame_id,
+                nearest,
+                farthest,
+                config.max_planes,
+                config.plane_step_px,
+                clamped,
+            )
+            nearest = clamped
+        # The clamped bounds are what the sweep actually used; the prior fill
+        # must gate on the same range, not on the pre-clamp sparse percentiles.
+        depth_limits[index] = (nearest, farthest)
         count = plane_count_for_range(
             nearest,
             farthest,
@@ -518,6 +647,75 @@ def run_dense(
         _save_depth(_depth_path(filtered_dir, index), filtered.depth)
         filtered_in_memory[index] = filtered.depth
     stage_seconds["consistency"] = time.time() - t0
+
+    # --- 4b. prior fill (opt-in) -------------------------------------------
+    # The fill happens AFTER the consistency filter: filled pixels only exist
+    # to replace MVS holes, and if they were added before the filter,
+    # cross_view_agreement would reject them against neighbour maps that have
+    # the same holes. fill_from_prior never touches measured (valid) pixels.
+    prior_filled = 0
+    if prior_maps:
+        t0 = time.time()
+        views_filled = 0
+        for index in usable:
+            if index not in prior_maps:
+                continue
+            depth = filtered_in_memory.get(index)
+            if depth is None:
+                depth = _load_depth(_depth_path(filtered_dir, index))
+            estimate = DepthEstimate(
+                depth=depth,
+                cost=np.zeros_like(depth),
+                num_views=(depth > 0).astype(np.uint8),
+                valid=depth > 0,
+            )
+            neighbours = [
+                j
+                for j in _neighbour_views(views, usable, index, config.consistency_views)
+                if j in prior_maps
+            ]
+            near, far = depth_limits.get(index, ranges[index])
+            filled_estimate, filled = fill_from_prior(
+                estimate,
+                prior_maps[index],
+                views[index],
+                [views[j] for j in neighbours],
+                [prior_maps[j] for j in neighbours],
+                near,
+                far,
+                min_support=config.prior_min_support,
+                tolerance=config.prior_tolerance,
+                avoid_edges=edge_mask(images.get(index), config.prior_edge_guard_px),
+            )
+            if filled:
+                filtered_in_memory[index] = filled_estimate.depth
+                _save_depth(_depth_path(filtered_dir, index), filled_estimate.depth)
+                prior_filled += filled
+                views_filled += 1
+        stage_seconds["prior_fill"] = time.time() - t0
+        logger.info(
+            "Prior fill added %d depth pixels in %d views", prior_filled, views_filled
+        )
+    if prior_summary is not None:
+        # Count coverage from the final depth maps themselves: the consistency
+        # filter rejects some MVS pixels, which the fill may then re-add as
+        # prior values, so stage counters must not be summed.
+        final_valid = 0
+        for index in usable:
+            depth = filtered_in_memory.get(index)
+            if depth is None:
+                depth = _load_depth(_depth_path(filtered_dir, index))
+            final_valid += int((depth > 0).sum())
+        prior_summary.pixels_filled = prior_filled
+        prior_summary.pixels_measured = final_valid - prior_filled
+        prior_summary.final_valid_fraction = float(final_valid / max(total_pixels, 1))
+        logger.info(
+            "Final depth coverage %.1f%% (%d measured + %d prior-filled of %d pixels)",
+            100.0 * prior_summary.final_valid_fraction,
+            prior_summary.pixels_measured,
+            prior_summary.pixels_filled,
+            total_pixels,
+        )
 
     # --- 5. fusion ---------------------------------------------------------
     t0 = time.time()
@@ -636,6 +834,8 @@ def run_dense(
         artifacts["mesh"] = str(mesh_path)
     if glb_path is not None:
         artifacts["glb"] = str(glb_path)
+    if prior_summary is not None:
+        artifacts["prior_report"] = str(out_dir / "prior_report.json")
     report = DenseReport(
         run_dir=str(run_path),
         dataset_label=poses.dataset_label,
@@ -671,6 +871,7 @@ def run_dense(
             point_spacing_meters=spacing_m,
         ),
         mesh=mesh_summary,
+        prior=prior_summary,
         scale=DenseScaleSummary(value=scale, source=scale_source, status=scale_status),
         evaluation=evaluation,
         stage_seconds={k: round(v, 3) for k, v in stage_seconds.items()},
@@ -724,11 +925,16 @@ def _default_tile(points: np.ndarray, voxel: float) -> float:
 
 def _write_markdown(path: Path, report: DenseReport) -> None:
     """Human-readable summary of a dense run."""
+    backend_note = "CPU multi-view stereo"
+    if report.prior is not None and report.prior.enabled:
+        backend_note += ", monocular prior fill"
+    else:
+        backend_note += ", no monocular prior"
     lines = [
         "# Dense reconstruction report",
         "",
         f"- Run: `{report.run_dir}`",
-        f"- Backend: `{report.backend}` (CPU multi-view stereo, no monocular prior)",
+        f"- Backend: `{report.backend}` ({backend_note})",
         f"- Views: {report.geometry.num_registered_views} registered, "
         f"{report.geometry.num_reference_views} used as depth references",
         f"- Working resolution: {report.geometry.working_width}x{report.geometry.working_height}",
@@ -742,6 +948,13 @@ def _write_markdown(path: Path, report: DenseReport) -> None:
     ]
     if report.mesh is not None:
         lines.append(f"- Mesh: {report.mesh.num_vertices} vertices, {report.mesh.num_faces} triangles")
+    if report.prior is not None and report.prior.enabled:
+        lines.append(
+            f"- Prior: {report.prior.views_accepted}/{report.prior.views_total} views accepted, "
+            f"{report.prior.pixels_filled:,} pixels filled from the monocular prior "
+            f"(inferred, not measured; measured in final maps: {report.prior.pixels_measured:,}); "
+            f"final coverage {report.prior.final_valid_fraction * 100:.1f}%; see prior_report.json"
+        )
     if report.evaluation:
         lines += ["", "## Ground-truth evaluation", ""]
         for key, value in sorted(report.evaluation.items()):

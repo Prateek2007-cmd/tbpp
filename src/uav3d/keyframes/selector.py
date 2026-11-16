@@ -239,11 +239,18 @@ class KeyframeSelector:
             selected_records = candidate_records
             break
 
-        # 4. Cap at max_frames
+        # 4. Cap at max_frames, spreading the picks across the whole clip so a
+        #    long single pass is represented from start to finish instead of
+        #    silently truncating to its first N frames.
         if len(selected_records) > self.max_frames:
-            logger.info(f"Capping selected keyframes from {len(selected_records)} to max_frames={self.max_frames}")
-            selected_records = selected_records[: self.max_frames]
-            selected_indices = selected_indices[: self.max_frames]
+            logger.info(
+                f"Capping selected keyframes from {len(selected_records)} to "
+                f"max_frames={self.max_frames}, spread uniformly across the clip"
+            )
+            total = len(selected_records)
+            picks = np.unique(np.linspace(0, total - 1, self.max_frames).astype(int)).tolist()
+            selected_indices = [selected_indices[i] for i in picks]
+            selected_records = [selected_records[i] for i in picks]
 
         logger.info(
             f"Selection completed: {len(selected_records)}/{total_frames} frames selected "

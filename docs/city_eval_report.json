@@ -1,0 +1,16 @@
+{
+  "recon_points": 120000,
+  "gt_points": 40633,
+  "gt_std_meters": 70.9362,
+  "chamfer_meters": 17.7842,
+  "chamfer_median_meters": 18.9932,
+  "fscore_at_0.05": 0.0716,
+  "precision_at_0.05": 0.041,
+  "completeness_at_0.05": 0.2837,
+  "fscore_at_0.1": 0.1588,
+  "precision_at_0.1": 0.0942,
+  "completeness_at_0.1": 0.5056,
+  "fscore_at_0.2": 0.3921,
+  "precision_at_0.2": 0.26,
+  "completeness_at_0.2": 0.7966
+}

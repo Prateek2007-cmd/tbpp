@@ -64,8 +64,13 @@ def newest_run_dir() -> Path | None:
     return runs[-1] if runs else None
 
 
-def stage_keyframes(video: Path, config: Path) -> Path:
-    code = main(["keyframes", "--video", str(video), "--config", str(config)])
+def stage_keyframes(video: Path, config: Path, start_frame: int = 0, end_frame: int | None = None) -> Path:
+    argv = ["keyframes", "--video", str(video), "--config", str(config)]
+    if start_frame:
+        argv += ["--start-frame", str(start_frame)]
+    if end_frame is not None:
+        argv += ["--end-frame", str(end_frame)]
+    code = main(argv)
     if code != 0:
         raise SystemExit(f"keyframes stage failed with exit code {code}")
     run_dir = newest_run_dir()
@@ -82,7 +87,8 @@ def stage_sfm(run_dir: Path, config: Path) -> dict:
     return poses
 
 
-def stage_dense(run_dir: Path, config: Path, max_width: int, ref_stride: int, mesh: bool) -> dict:
+def stage_dense(run_dir: Path, config: Path, max_width: int, ref_stride: int,
+                mesh: bool, prior: bool = False) -> dict:
     argv = [
         "dense",
         "--config", str(config),
@@ -92,6 +98,8 @@ def stage_dense(run_dir: Path, config: Path, max_width: int, ref_stride: int, me
     ]
     if not mesh:
         argv.append("--no-mesh")
+    if prior:
+        argv.append("--prior")
     code = main(argv)
     if code != 0:
         raise SystemExit(f"dense stage failed with exit code {code}")
@@ -207,7 +215,21 @@ def main_cli() -> int:
     parser.add_argument("--max-width", type=int, default=960,
                         help="Dense working width; 960 is the fast preview, 1600 the full run")
     parser.add_argument("--ref-stride", type=int, default=2)
+    parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=0,
+        help="First video frame to ingest (0-based, inclusive)",
+    )
+    parser.add_argument(
+        "--end-frame",
+        type=int,
+        default=None,
+        help="Last video frame to ingest (0-based, exclusive)",
+    )
     parser.add_argument("--mesh", action="store_true", help="Also build the visualisation mesh")
+    parser.add_argument("--prior", action="store_true",
+                        help="Fill MVS-invalid pixels with a monocular depth prior (default off)")
     parser.add_argument("--preview", action="store_true",
                         help="Quick pass at 640 px to prove the chain works before the full run")
     parser.add_argument("--stage", choices=("keyframes", "sfm", "dense", "all"), default="all",
@@ -234,6 +256,10 @@ def main_cli() -> int:
     print(f"Video: {video}")
     print(f"  {info['width']}x{info['height']}, {info['frames']} frames, "
           f"{info['fps']:.2f} fps, {info['seconds']:.1f} s")
+    if args.start_frame or args.end_frame is not None:
+        end = args.end_frame if args.end_frame is not None else info["frames"]
+        print(f"  using frame range {args.start_frame}..{end - 1} "
+              f"({end - args.start_frame} frames)")
     if info["frames"] == 0 or info["width"] == 0:
         raise SystemExit("Video reports zero frames; the file may be corrupt or unsupported")
 
@@ -244,7 +270,7 @@ def main_cli() -> int:
 
     if args.stage in ("keyframes", "all") and run_dir is None:
         print("\n--- keyframes ---")
-        run_dir = stage_keyframes(video, config)
+        run_dir = stage_keyframes(video, config, args.start_frame, args.end_frame)
     elif run_dir is None:
         run_dir = newest_run_dir()
         if run_dir is None:
@@ -256,7 +282,8 @@ def main_cli() -> int:
 
     if args.stage in ("dense", "all"):
         print("\n--- dense ---")
-        dense = stage_dense(run_dir, config, args.max_width, args.ref_stride, args.mesh)
+        dense = stage_dense(run_dir, config, args.max_width, args.ref_stride,
+                            args.mesh, prior=args.prior)
         if poses is None:
             poses_path = run_dir / "poses.json"
             poses = json.loads(poses_path.read_text()) if poses_path.exists() else None

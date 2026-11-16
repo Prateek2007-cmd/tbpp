@@ -120,6 +120,32 @@ class TestKeyframeSelector:
         assert res.stride_reductions > 0
         assert res.selected_count >= 3
 
+    def test_cap_spreads_across_entire_clip(self, tmp_path: Path) -> None:
+        """A max_frames cap must represent the whole clip, not only its start."""
+        img_dir = tmp_path / "dataset" / "MAV Images"
+        img_dir.mkdir(parents=True)
+        img = np.full((480, 640, 3), 120, dtype=np.uint8)
+        for x in range(0, 640, 30):
+            img[:, x : x + 15] = 180
+        for i in range(10):
+            cv2.imwrite(str(img_dir / f"frame_{i:05d}.jpg"), img)
+
+        source = ZurichSequenceSource(dataset_dir=tmp_path / "dataset", start_id=0, count=10)
+        config = KeyframeConfig(stride=1, min_blur=10.0, max_clipping=0.5, max_gap=3, max_frames=4)
+        selector = KeyframeSelector(config)
+
+        run_dir = tmp_path / "run_cap_spread"
+        res = selector.select(source, output_dir=run_dir)
+
+        data = json.loads((run_dir / "keyframes.json").read_text(encoding="utf-8"))
+        ids = [k["frame_id"] for k in data["keyframes"]]
+        assert res.selected_count == 4
+        assert len(ids) == 4
+        assert ids[0] == "zurich_000000"
+        assert ids[-1] == "zurich_000009"
+        gaps = sorted(set(int(ids[i + 1].split("_")[-1]) - int(ids[i].split("_")[-1]) for i in range(len(ids) - 1)))
+        assert max(gaps) >= 3
+
     def test_decode_failure_handled_gracefully(self, tmp_path: Path) -> None:
         img_dir = tmp_path / "corrupt_ds" / "MAV Images"
         img_dir.mkdir(parents=True)

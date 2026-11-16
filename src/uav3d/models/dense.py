@@ -61,6 +61,31 @@ class DenseMeshSummary(BaseModel):
     voxel_units: float = Field(..., gt=0.0)
 
 
+class DensePriorSummary(BaseModel):
+    """Provenance for pixels filled by the monocular prior (not measured)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    model_path: str | None = None
+    views_total: int = Field(default=0, ge=0)
+    views_accepted: int = Field(default=0, ge=0)
+    median_corr: float | None = None
+    median_error: float | None = None
+    pixels_filled: int = Field(
+        default=0, ge=0, description="Pixels taken from the monocular prior (inferred, not measured)"
+    )
+    pixels_measured: int = Field(
+        default=0, ge=0, description="Measured MVS pixels surviving in the final depth maps"
+    )
+    final_valid_fraction: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Final depth-map coverage (measured + prior-filled) as a fraction of all pixels",
+    )
+
+
 class DenseScaleSummary(BaseModel):
     """Metric scale provenance — never silently assumed."""
 
@@ -85,6 +110,10 @@ class DenseReport(BaseModel):
     depth: DenseDepthSummary
     fusion: DenseFusionSummary
     mesh: DenseMeshSummary | None = Field(default=None)
+    prior: DensePriorSummary | None = Field(
+        default=None,
+        description="Present only when the monocular prior was enabled",
+    )
     scale: DenseScaleSummary
     evaluation: dict[str, Any] | None = Field(default=None, description="Ground-truth metrics when supplied")
     stage_seconds: dict[str, float] = Field(default_factory=dict)

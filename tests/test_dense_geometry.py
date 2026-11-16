@@ -1,16 +1,20 @@
 """Unit tests for the dense-stage projective geometry and error model."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
-from uav3d.dense.cameras import Intrinsics
+from uav3d.dense.cameras import CameraView, Intrinsics
 from uav3d.dense.geometry import (
+    clamp_near_for_plane_budget,
     depth_noise_sigma,
     depth_planes,
     depth_sigma_array,
     parse_depth_range,
     plane_count_for_range,
     plane_homography,
+    sparse_depth_range,
     umeyama_similarity,
 )
 from uav3d.exceptions import DataError
@@ -138,3 +142,39 @@ def test_parse_depth_range() -> None:
         parse_depth_range("nonsense")
     with pytest.raises(DataError):
         parse_depth_range("0:10")
+
+
+def _fake_view() -> CameraView:
+    K = Intrinsics(fx=500.0, fy=500.0, cx=320.0, cy=240.0, width=640, height=480)
+    return CameraView(
+        index=0,
+        frame_id="x",
+        image_path=Path("x.jpg"),
+        R=np.eye(3),
+        t=np.zeros(3),
+        intrinsics=K,
+    )
+
+
+def test_sparse_depth_range_rejects_near_outliers() -> None:
+    """A few points triangulated almost on top of the camera must not set near."""
+    view = _fake_view()
+    rng = np.random.default_rng(7)
+    pts = np.stack(
+        [rng.normal(0.0, 1.0, 500), rng.normal(0.0, 1.0, 500), np.full(500, 10.0)],
+        axis=1,
+    )
+    pts = np.vstack([pts, np.array([[0.0, 0.0, 0.05], [0.1, -0.1, 0.05]])])
+    near, far, median, n = sparse_depth_range(view, pts, 2.0, 98.0, 0.25, 0.28)
+    assert n >= 500
+    assert near > 4.0
+    assert median == pytest.approx(10.0, rel=0.15)
+    assert far > near
+
+
+def test_clamp_near_for_plane_budget_keeps_step() -> None:
+    near = clamp_near_for_plane_budget(0.05, 17.7, 869.0, 0.5, 0.7, 160, 1.5)
+    assert near > 2.0
+    assert near < 3.5
+    unchanged = clamp_near_for_plane_budget(8.0, 17.7, 869.0, 0.5, 0.7, 160, 1.5)
+    assert unchanged == pytest.approx(8.0)

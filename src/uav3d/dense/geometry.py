@@ -90,6 +90,37 @@ def plane_count_for_range(
     return int(np.clip(count, min_planes, max_planes))
 
 
+def clamp_near_for_plane_budget(
+    near: float,
+    far: float,
+    focal_px: float,
+    baseline: float,
+    step_px: float,
+    max_planes: int,
+    relax: float = 1.5,
+) -> float:
+    """Raise the near plane until the plane count fits ``max_planes``.
+
+    ``plane_count_for_range`` clips the count but leaves the range untouched,
+    so a depth range that needs thousands of planes gets swept with a disparity
+    step dozens of pixels wide — depth resolution collapses exactly where the
+    camera is looking. When the sweep cannot afford the requested step, this
+    moves the near plane outward (rather than the far plane inward, which would
+    discard the background) until the step is at most ``step_px * relax``.
+
+    Returns:
+        The new near plane; unchanged when the budget is already satisfiable.
+    """
+    if far <= near or near <= 0 or focal_px <= 0 or baseline <= 0:
+        return near
+    max_span = float(max_planes) * max(step_px, 1e-6) * max(relax, 1.0)
+    span = abs(focal_px * baseline) * (1.0 / near - 1.0 / far)
+    if span <= max_span:
+        return near
+    inv_near = 1.0 / far + max_span / (abs(focal_px * baseline))
+    return max(1.0 / inv_near, near * 0.99)
+
+
 def _weighted_percentile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
     """Weighted percentile ``q`` (0-100) of ``values``."""
     order = np.argsort(values)
@@ -156,6 +187,7 @@ def sparse_depth_range(
     low_pct: float,
     high_pct: float,
     margin: float,
+    near_min_ratio: float = 0.28,
 ) -> tuple[float, float, float, int]:
     """Derive a per-view depth range from sparse SfM points visible in that view.
 
@@ -164,6 +196,8 @@ def sparse_depth_range(
         points: ``(N, 3)`` sparse points in SfM units.
         low_pct / high_pct: percentiles of the observed depth distribution.
         margin: fractional expansion applied on both sides.
+        near_min_ratio: the final near plane is never closer than this fraction
+            of the weighted median depth Of the (outlier-filtered) sparse set.
 
     Returns:
         ``(near, far, median_depth, num_points)``. The median is what view
@@ -185,6 +219,16 @@ def sparse_depth_range(
             "cannot derive a trustworthy depth range for dense MVS."
         )
 
+    # SfM tracks triangulated with a tiny baseline project a handful of points
+    # almost on top of the camera; those depths are geometrically meaningless but
+    # dominate any near percentile. Drop points more than 20x median depth away
+    # before computing the statistics.
+    median_all = float(np.median(z))
+    if median_all > 0:
+        keep = (z >= 0.05 * median_all) & (z <= 20.0 * median_all)
+        if int(keep.sum()) >= 20:
+            z = z[keep]
+
     # Sparse points sample the surface, not the image. A point at depth z covers
     # an image area proportional to 1/z^2, so weighting by that converts the
     # surface distribution into the pixel-coverage distribution — which is what
@@ -195,6 +239,9 @@ def sparse_depth_range(
     median = _weighted_percentile(z, weights, 50.0)
     near *= 1.0 - margin
     far *= 1.0 + margin
+    # Floor the near plane. With a clean median this keeps every plane budget
+    # defensible and stops a single spurious near track from starving the sweep.
+    near = max(near, float(near_min_ratio) * median)
     return max(near, 1e-6), max(far, near * 1.2), max(median, 1e-6), int(z.size)
 
 

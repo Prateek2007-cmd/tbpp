@@ -63,11 +63,17 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
 def _build_source(cfg: PipelineConfig, data_dir: str, args: argparse.Namespace) -> ImageSource:
     """Build and initialize ImageSource adapter from configuration or CLI arguments."""
     video_cli = getattr(args, "video", None)
+    start_frame = int(getattr(args, "start_frame", 0) or 0)
+    end_frame = getattr(args, "end_frame", None)
     if video_cli:
         video_path = Path(video_cli).resolve()
         if not video_path.exists():
             raise Uav3dError(f"Specified video file does not exist: {video_path}")
-        return VideoFileSource(video_path=video_path)
+        return VideoFileSource(
+            video_path=video_path,
+            start_frame=start_frame,
+            end_frame=end_frame,
+        )
 
     source_type = cfg.source.type.lower()
     if source_type == "zurich":
@@ -85,7 +91,11 @@ def _build_source(cfg: PipelineConfig, data_dir: str, args: argparse.Namespace) 
         video_path = Path(cfg.source.video_path or (Path(data_dir) / "interim" / "synthetic.mp4")).resolve()
         if not video_path.exists():
             raise Uav3dError(f"Video file not found at: {video_path}")
-        return VideoFileSource(video_path=video_path)
+        return VideoFileSource(
+            video_path=video_path,
+            start_frame=start_frame,
+            end_frame=end_frame,
+        )
 
     raise Uav3dError(f"Unsupported source type '{source_type}'. Must be 'zurich' or 'video'.")
 
@@ -688,6 +698,8 @@ def _handle_dense_command(args: argparse.Namespace) -> int:
             dense_cfg.scale_factor = float(args.scale_factor)
         if getattr(args, "no_mesh", False):
             dense_cfg.mesh = False
+        if getattr(args, "prior", False):
+            dense_cfg.prior_enabled = True
 
         logger.info(f"Dense reconstruction for run: {run_dir}")
         result = run_dense(
@@ -774,6 +786,18 @@ def create_parser() -> argparse.ArgumentParser:
         help="Extract and select sharp keyframes from ingested video/images",
     )
     _add_common_arguments(keyframes_parser)
+    keyframes_parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=0,
+        help="First video frame to ingest (0-based, inclusive; video input only)",
+    )
+    keyframes_parser.add_argument(
+        "--end-frame",
+        type=int,
+        default=None,
+        help="Last video frame to ingest (0-based, exclusive; video input only)",
+    )
 
     # 3. sfm
     sfm_parser = subparsers.add_parser(
@@ -898,6 +922,14 @@ def create_parser() -> argparse.ArgumentParser:
         "--no-mesh",
         action="store_true",
         help="Skip mesh reconstruction (point cloud only)",
+    )
+    dense_parser.add_argument(
+        "--prior",
+        action="store_true",
+        help=(
+            "Fill MVS-invalid pixels with a monocular depth prior (Depth Anything V2) "
+            "aligned to the SfM frame; gated by neighbouring views' priors. Default off."
+        ),
     )
     dense_parser.add_argument(
         "--quick",

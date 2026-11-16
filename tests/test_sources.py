@@ -146,6 +146,31 @@ class TestVideoFileSource:
         assert frame.timestamp_us == 500000  # 5th frame at 10 fps = 0.5s = 500,000 µs
 
 
+class TestVideoFrameRange:
+    """Frame-range ingestion should expose exactly the selected frames."""
+
+    def test_video_frame_range(self, fake_video_file: Path) -> None:
+        source = VideoFileSource(video_path=fake_video_file, start_frame=3, end_frame=7)
+        meta = source.metadata()
+        assert meta.frame_count == 4
+        assert meta.first_frame_id == "video_000003"
+        assert meta.last_frame_id == "video_000006"
+
+        ids = [f.frame_id for f in source.iter_frames()]
+        assert ids == ["video_000003", "video_000004", "video_000005", "video_000006"]
+        assert source.get_frame("video_000006").frame_id == "video_000006"
+        with pytest.raises(DataError):
+            source.get_frame("video_000002")
+        with pytest.raises(DataError):
+            source.get_frame("video_000007")
+
+    def test_invalid_frame_range(self, fake_video_file: Path) -> None:
+        with pytest.raises(DataError):
+            VideoFileSource(video_path=fake_video_file, start_frame=8, end_frame=5)
+        with pytest.raises(DataError):
+            VideoFileSource(video_path=fake_video_file, start_frame=99)
+
+
 class TestInspectCliWithFixture:
     """Test uav3d inspect CLI invocation against synthetic Zurich fixture."""
 

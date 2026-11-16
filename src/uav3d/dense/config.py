@@ -101,6 +101,29 @@ class DenseConfig(BaseModel):
         ge=0.0,
         description="Fractional margin applied outside the sparse depth percentiles",
     )
+    depth_near_min_ratio: float = Field(
+        default=0.28,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Floor for the near plane as a fraction of the median sparse depth. "
+            "SfM outlier tracks triangulate a handful of points almost on top of "
+            "the camera; their 1/z^2 coverage weight then drags the 2nd-percentile "
+            "near plane to near-zero and starves the plane sweep of resolution in "
+            "the range the camera actually sees. Keeping the near plane at least "
+            "this far from the median makes every plane budget defensible."
+        ),
+    )
+    depth_near_plane_relax: float = Field(
+        default=1.5,
+        ge=1.0,
+        description=(
+            "When the required plane count exceeds max_planes the near plane is "
+            "moved outward until the disparity step is at most "
+            "plane_step_px * depth_near_plane_relax. This guarantees the sweep "
+            "never silently steps wider than intended."
+        ),
+    )
     depth_range: str | None = Field(
         default=None,
         description="Manual override 'min:max' in SfM units, applied to every view",
@@ -125,6 +148,51 @@ class DenseConfig(BaseModel):
         default=2,
         ge=1,
         description="Number of neighbouring depth maps that must agree on a point",
+    )
+
+    # --- monocular depth prior (opt-in) -------------------------------------
+    prior_enabled: bool = Field(
+        default=False,
+        description=(
+            "Fill MVS-invalid pixels with a Depth Anything V2 prior aligned to the SfM frame. "
+            "Only pixels rejected by the MVS/consistency gates are filled, and only where "
+            "neighbouring views' priors agree. Default off: measured MVS output is unchanged."
+        ),
+    )
+    prior_model_path: str = Field(
+        default="models/checkpoints/depth_anything_v2_vits.onnx",
+        description="Path to the Depth Anything V2 ONNX checkpoint",
+    )
+    prior_infer_height: int = Field(
+        default=518,
+        gt=14,
+        description="Internal inference height for the monocular model",
+    )
+    prior_min_rank_corr: float = Field(
+        default=0.35,
+        gt=0.0,
+        le=1.0,
+        description="Minimum rank correlation of the inverse-depth fit for a view's prior to be accepted",
+    )
+    prior_max_relative_error: float = Field(
+        default=0.35,
+        gt=0.0,
+        description="Maximum median relative depth error of the fit for a view's prior to be accepted",
+    )
+    prior_min_support: int = Field(
+        default=2,
+        ge=1,
+        description="Neighbouring views whose priors must agree before a hole pixel is filled",
+    )
+    prior_tolerance: float = Field(
+        default=0.06,
+        gt=0.0,
+        description="Relative depth agreement tolerance between the prior and neighbouring priors",
+    )
+    prior_edge_guard_px: int = Field(
+        default=1,
+        ge=0,
+        description="Distance from strong image edges where prior filling is forbidden",
     )
 
     # --- fusion -------------------------------------------------------------
