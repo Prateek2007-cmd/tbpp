@@ -5,7 +5,12 @@ from pathlib import Path
 import numpy as np
 
 from uav3d.dense.cameras import CameraView, Intrinsics
-from uav3d.dense.prior import depth_from_prior, fill_from_prior, fit_inverse_depth
+from uav3d.dense.prior import (
+    depth_from_prior,
+    fill_from_prior,
+    fit_inverse_depth,
+    sky_mask,
+)
 from uav3d.dense.sweep import DepthEstimate
 
 N = 400
@@ -115,3 +120,69 @@ def test_fill_prior_requires_neighbour_agreement() -> None:
     assert count_rejected == 0
     assert not rejected.valid[24, 32]
     assert rejected.depth[24, 32] == 0.0
+
+
+def _sky_scene() -> np.ndarray:
+    """Bright smooth pale-blue top band over dark textured ground."""
+    rng = np.random.default_rng(3)
+    image = np.zeros((48, 64, 3), dtype=np.uint8)
+    # Sky: pale blue in BGR, smooth (constant colour, no texture).
+    image[:17, :, 0] = 235  # B
+    image[:17, :, 1] = 225  # G
+    image[:17, :, 2] = 215  # R
+    # Ground: dark, saturated, noisy texture.
+    image[17:, :, :] = rng.integers(20, 90, size=(31, 64, 3), dtype=np.uint8)
+    return image
+
+
+def test_sky_mask_covers_smooth_bright_top_band_only() -> None:
+    mask = sky_mask(_sky_scene())
+    assert mask.shape == (48, 64)
+    # Top band is sky.
+    assert mask[4, 32]
+    assert mask[10, 10]
+    # Textured dark ground below the band is not sky.
+    assert not mask[30, 32]
+    assert not mask[47, 32]
+    # Most of the top band is masked, almost none of the ground is.
+    assert mask[:17].mean() > 0.8
+    assert mask[17:].mean() < 0.05
+
+
+def test_sky_mask_ignores_textured_image() -> None:
+    rng = np.random.default_rng(5)
+    image = rng.integers(0, 255, size=(48, 64, 3), dtype=np.uint8)
+    assert not sky_mask(image).any()
+
+
+def test_sky_mask_ignores_bright_textured_roof_in_top_band() -> None:
+    # Bright but strongly textured top band: a sunlit roof, not sky. A few
+    # isolated pixels may pass the per-pixel guard by chance, but there is
+    # no coherent sky band to mask.
+    rng = np.random.default_rng(9)
+    image = rng.integers(180, 255, size=(48, 64, 3), dtype=np.uint8)
+    assert sky_mask(image).mean() < 0.05
+
+
+def test_prior_fill_respects_sky_mask() -> None:
+    # The hole pixel sits in the sky band; the neighbour prior agrees, so
+    # without a guard it would be filled — with the sky mask it must not be.
+    ref = _view(0)
+    neighbour = _view(1)
+    estimate = _estimate_with_one_hole()
+    prior = np.full((48, 64), 6.0, dtype=np.float32)
+    sky = np.zeros((48, 64), dtype=bool)
+    sky[24, 32] = True
+    filled, count = fill_from_prior(
+        estimate,
+        prior,
+        ref,
+        [neighbour],
+        [np.full((48, 64), 6.0, dtype=np.float32)],
+        near=2.0,
+        far=12.0,
+        min_support=1,
+        avoid_edges=sky,
+    )
+    assert count == 0
+    assert not filled.valid[24, 32]

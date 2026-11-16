@@ -13,8 +13,56 @@ from uav3d.config import SfmConfig
 from uav3d.exceptions import Uav3dError
 from uav3d.models.frames import CameraCalibration
 from uav3d.sfm.colmap_compat import get_peak_rss_mb
+from uav3d.sfm.focal_gate import check_focal_drift, solved_focal_px
 
 logger = logging.getLogger("uav3d.sfm.runner")
+
+
+def match_features(database_path: str, config: SfmConfig) -> str:
+    """Run the configured COLMAP matcher and return which one ran.
+
+    ``sequential`` (default) matches each frame to its temporal neighbours —
+    fast, but drift accumulates over a long pass with no loop closure.
+    ``exhaustive`` matches every pair, which closes loops when the flight
+    revisits an area, at O(n^2) matching cost; use it for short runs or
+    passes that return over already-flown ground. Anything else is a
+    configuration error, not a silent fall back to sequential: the config
+    field documents both options, so an unknown value means the user asked
+    for a matcher that does not exist.
+    """
+    tvg_opts = pycolmap.TwoViewGeometryOptions()
+    if config.ignore_watermarks:
+        tvg_opts.detect_watermark = False
+
+    matcher = config.matcher_type.lower()
+    if matcher == "sequential":
+        seq_opts = pycolmap.SequentialMatchingOptions()
+        seq_opts.overlap = config.seq_overlap
+        try:
+            pycolmap.match_sequential(
+                database_path,
+                matching_options=seq_opts,
+                verification_options=tvg_opts,
+            )
+        except Exception as exc:
+            raise Uav3dError(f"Sequential feature matching failed: {exc}") from exc
+        return "sequential"
+    if matcher == "exhaustive":
+        logger.warning(
+            "Exhaustive matching matches every image pair (O(n^2)); "
+            "expect a much longer matching stage than sequential on long passes."
+        )
+        try:
+            pycolmap.match_exhaustive(
+                database_path,
+                verification_options=tvg_opts,
+            )
+        except Exception as exc:
+            raise Uav3dError(f"Exhaustive feature matching failed: {exc}") from exc
+        return "exhaustive"
+    raise Uav3dError(
+        f"Unknown matcher_type '{config.matcher_type}'; supported: 'sequential', 'exhaustive'."
+    )
 
 
 @dataclass
@@ -41,6 +89,15 @@ class SfmRunResult:
     profiles: list[SfmStageProfile]
     total_wall_time_s: float
     peak_rss_mb: float
+    # Focal-drift gate (Phase 2): the focal COLMAP solved with, against the
+    # prior focal the run started from. ``focal_drift_exceeded`` is True when
+    # the solved focal moved by more than ``SfmConfig.focal_drift_max_rel``.
+    # The gate flags drift; it never clamps the focal.
+    matcher_type: str = "sequential"
+    prior_focal_px: float | None = None
+    solved_focal_px: float | None = None
+    focal_drift_rel: float | None = None
+    focal_drift_exceeded: bool = False
 
 
 class SfmRunner:
@@ -170,26 +227,16 @@ class SfmRunner:
         )
 
         # -------------------------------------------------------------
-        # Stage 3: Sequential Feature Matching
+        # Stage 3: Feature Matching (matcher_type is wired, not decorative:
+        # SfmConfig documents sequential and exhaustive, and an unknown value
+        # is a configuration error raised by match_features)
         # -------------------------------------------------------------
         t0 = time.perf_counter()
-        logger.info(f"Stage 3/4: Sequential feature matching (overlap={self.config.seq_overlap})")
-
-        seq_opts = pycolmap.SequentialMatchingOptions()
-        seq_opts.overlap = self.config.seq_overlap
-
-        tvg_opts = pycolmap.TwoViewGeometryOptions()
-        if self.config.ignore_watermarks:
-            tvg_opts.detect_watermark = False
-
-        try:
-            pycolmap.match_sequential(
-                str(database_path),
-                matching_options=seq_opts,
-                verification_options=tvg_opts,
-            )
-        except Exception as exc:
-            raise Uav3dError(f"Sequential feature matching failed: {exc}") from exc
+        logger.info(
+            f"Stage 3/4: Feature matching (matcher={self.config.matcher_type}, "
+            f"overlap={self.config.seq_overlap})"
+        )
+        matcher_used = match_features(str(database_path), self.config)
 
         profiles.append(
             SfmStageProfile(
@@ -287,6 +334,43 @@ class SfmRunner:
         overall_time = time.perf_counter() - overall_start
         peak_rss = get_peak_rss_mb()
 
+        # --- Focal-drift gate (Phase 2) ----------------------------------
+        # Forward flight trades focal length against depth, so a solved focal
+        # far from the prior usually means a depth stretch was absorbed into
+        # the camera. The gate flags it; it never clamps the focal. With
+        # focal_drift_action="fail" an exceeded gate aborts the run instead
+        # of handing a stretched model to the dense stage.
+        prior_focal = solved_focal_px(calibration.model, list(calibration.params))
+        solved_focal = None
+        focal_drift: float | None = None
+        focal_exceeded = False
+        try:
+            solved_params = []
+            for cam in selected_rec.cameras.values():
+                cam_model = str(cam.model).replace("CameraModelId.", "")
+                solved_params.append(solved_focal_px(cam_model, list(cam.params)))
+            if solved_params:
+                solved_focal = float(np.mean(solved_params))
+                gate = check_focal_drift(
+                    prior_focal, solved_focal, max_rel_drift=self.config.focal_drift_max_rel
+                )
+                focal_drift = gate.rel_drift
+                focal_exceeded = gate.exceeded
+                if gate.exceeded:
+                    logger.warning("Focal-drift gate exceeded: %s", gate.message)
+                    if self.config.focal_drift_action == "fail":
+                        raise Uav3dError(
+                            f"Focal-drift gate exceeded: {gate.message}. "
+                            "Re-run with refine_intrinsics=false or a tighter "
+                            "focal_drift_max_rel to fail fast on this instead."
+                        )
+                else:
+                    logger.info("Focal-drift gate: %s", gate.message)
+        except Uav3dError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a gate failure must not mask a good run
+            logger.warning("Focal-drift gate could not be evaluated: %s", exc)
+
         logger.info(
             f"SfM Completed successfully: {num_reg}/{total_images} frames registered ({reg_rate*100:.1f}%), "
             f"reproj error={mean_reproj:.3f} px, wall_time={overall_time:.2f}s, peak_rss={peak_rss:.1f} MB"
@@ -304,4 +388,9 @@ class SfmRunner:
             profiles=profiles,
             total_wall_time_s=overall_time,
             peak_rss_mb=peak_rss,
+            matcher_type=matcher_used,
+            prior_focal_px=float(prior_focal),
+            solved_focal_px=solved_focal,
+            focal_drift_rel=focal_drift,
+            focal_drift_exceeded=focal_exceeded,
         )

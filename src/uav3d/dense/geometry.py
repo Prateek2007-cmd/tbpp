@@ -260,38 +260,42 @@ def parse_depth_range(spec: str) -> tuple[float, float]:
 def load_sparse_points(run_dir: str | Path) -> np.ndarray | None:
     """Load the SfM sparse point cloud for a run, if it is available.
 
-    Tries ``sparse_points.npz`` first, then the COLMAP model written by the SfM
-    stage (``colmap/sparse/*``). Returns ``None`` when neither exists, in which
-    case the caller must supply an explicit depth range.
+    Tries the COLMAP model written by the SfM stage (``colmap/sparse/*``)
+    first, then the ``sparse_points.npz`` cache. The cache is only a
+    fallback: it is written by the dense stage from whatever model existed
+    at the time, so after a re-run of the SfM stage it is stale, and the
+    dense depth ranges derived from it would come from the previous
+    reconstruction (wrong focal, wrong depths). Preferring the model makes
+    a re-run self-consistent.
     """
     run_path = Path(run_dir)
+
+    sparse_root = run_path / "colmap" / "sparse"
+    if sparse_root.exists():
+        candidates = [p for p in sorted(sparse_root.iterdir()) if p.is_dir()] or [sparse_root]
+        try:
+            import pycolmap
+        except ImportError:
+            logger.warning("pycolmap unavailable; cannot read the COLMAP sparse model for depth ranges")
+        else:
+            for candidate in candidates:
+                try:
+                    reconstruction = pycolmap.Reconstruction(str(candidate))
+                except Exception:  # noqa: BLE001 - model directories vary by version
+                    continue
+                points = reconstruction.points3D
+                if not points:
+                    continue
+                xyz = np.array([p.xyz for p in points.values()], dtype=np.float64)
+                logger.info("Loaded %d sparse points from %s", xyz.shape[0], candidate)
+                return xyz
+
     npz = run_path / "sparse_points.npz"
     if npz.exists():
         with np.load(npz) as data:
             if "points" in data:
                 return np.asarray(data["points"], dtype=np.float64)
 
-    sparse_root = run_path / "colmap" / "sparse"
-    if not sparse_root.exists():
-        return None
-    candidates = [p for p in sorted(sparse_root.iterdir()) if p.is_dir()] or [sparse_root]
-    try:
-        import pycolmap
-    except ImportError:
-        logger.warning("pycolmap unavailable; cannot read the COLMAP sparse model for depth ranges")
-        return None
-
-    for candidate in candidates:
-        try:
-            reconstruction = pycolmap.Reconstruction(str(candidate))
-        except Exception:  # noqa: BLE001 - model directories vary by version
-            continue
-        points = reconstruction.points3D
-        if not points:
-            continue
-        xyz = np.array([p.xyz for p in points.values()], dtype=np.float64)
-        logger.info("Loaded %d sparse points from %s", xyz.shape[0], candidate)
-        return xyz
     return None
 
 

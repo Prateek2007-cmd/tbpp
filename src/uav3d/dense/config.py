@@ -194,6 +194,22 @@ class DenseConfig(BaseModel):
         ge=0,
         description="Distance from strong image edges where prior filling is forbidden",
     )
+    prior_sky_guard: bool = Field(
+        default=True,
+        description=(
+            "Forbid prior filling in sky pixels (bright, desaturated, smooth, in the "
+            "top of the frame). A monocular model assigns the sky a smooth pseudo-depth "
+            "that neighbouring priors agree on, so the agreement gate alone cannot "
+            "tell sky from a real surface — without this guard a visible horizon "
+            "becomes a solid sheet at the far plane."
+        ),
+    )
+    prior_sky_max_row_fraction: float = Field(
+        default=0.35,
+        gt=0.0,
+        le=1.0,
+        description="Fraction of image height (from the top) in which sky pixels may occur",
+    )
 
     # --- fusion -------------------------------------------------------------
     voxel_m: float | None = Field(

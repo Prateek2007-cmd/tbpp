@@ -200,6 +200,52 @@ def edge_mask(image_bgr: np.ndarray, radius: int = 1) -> np.ndarray:
     return cv2.dilate(edges, kernel, iterations=1) > 0
 
 
+def sky_mask(
+    image_bgr: np.ndarray,
+    max_row_fraction: float = 0.35,
+    max_saturation: int = 48,
+    min_value: int = 170,
+    max_grad: float = 12.0,
+) -> np.ndarray:
+    """Pixels that look like sky: depth-prior no-go zone.
+
+    Sky is the one surface a monocular model reliably invents: it is smooth,
+    so neighbouring views' prior maps agree on it within tolerance, and it
+    sits at the far plane, so the depth-range gate passes it. The only thing
+    that distinguishes it from a real smooth surface is the image itself.
+
+    A pixel is sky when all four hold: it is in the top ``max_row_fraction``
+    of the frame, it is bright and desaturated in HSV (pale blue / white /
+    haze, not a coloured roof or wall), and its local gradient is small
+    (smooth, not textured). All four conditions together keep the mask
+    conservative — a bright textured roof or a sunlit wall in the top of the
+    frame is not masked, and neither is anything below the horizon band.
+    """
+    image = np.asarray(image_bgr)
+    if image.ndim != 3 or image.shape[2] < 3:
+        raise ValueError("sky mask expects an HxWx3 image")
+    height, width = image.shape[:2]
+    mask = np.zeros((height, width), dtype=bool)
+    if height == 0 or width == 0:
+        return mask
+    band = max(1, int(round(height * float(max_row_fraction))))
+    top = image[:band, :, :3]
+    hsv = cv2.cvtColor(top, cv2.COLOR_BGR2HSV)
+    saturation = hsv[:, :, 1].astype(np.int32)
+    value = hsv[:, :, 2].astype(np.int32)
+    gray = cv2.cvtColor(top, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    grad = np.sqrt(gx * gx + gy * gy)
+    sky = (
+        (saturation <= max_saturation)
+        & (value >= min_value)
+        & (grad <= float(max_grad))
+    )
+    mask[:band] = sky
+    return mask
+
+
 def fill_from_prior(
     estimate: DepthEstimate,
     prior: np.ndarray,

@@ -67,6 +67,7 @@ from uav3d.dense.prior import (
     build_prior,
     edge_mask,
     fill_from_prior,
+    sky_mask,
 )
 from uav3d.dense.sweep import (
     DepthEstimate,
@@ -135,12 +136,21 @@ def _load_or_build_rectified(
     output_dir: Path,
     target_width: int,
 ) -> tuple[list[Path], Intrinsics]:
-    """Return cached rectified image paths and the shared pinhole intrinsics."""
+    """Return cached rectified image paths and the shared pinhole intrinsics.
+
+    The cache is only reused when the stored geometry still matches the
+    intrinsics the current run's poses imply. After an SfM re-run (a
+    different solved focal, a different working width) the cached
+    ``geometry.json`` is stale: reusing it would silently run the whole
+    dense stage — plane sweep and fusion — with the previous run's focal
+    while the summary reports the new one. On mismatch the cache is
+    rebuilt from the current views.
+    """
     geometry_path = output_dir / "geometry.json"
     expected = [output_dir / f"{view.index:05d}.png" for view in views]
     if geometry_path.exists() and all(p.exists() for p in expected):
         data = json.loads(geometry_path.read_text(encoding="utf-8"))
-        intr = Intrinsics(
+        cached = Intrinsics(
             fx=float(data["fx"]),
             fy=float(data["fy"]),
             cx=float(data["cx"]),
@@ -148,11 +158,25 @@ def _load_or_build_rectified(
             width=int(data["width"]),
             height=int(data["height"]),
         )
-        for view in views:
-            view.intrinsics = intr
-        return expected, intr
+        current = views[0].intrinsics
+        if (
+            abs(cached.fx - current.fx) <= 1e-6
+            and abs(cached.fy - current.fy) <= 1e-6
+            and abs(cached.cx - current.cx) <= 1e-6
+            and abs(cached.cy - current.cy) <= 1e-6
+            and (cached.width, cached.height) == (current.width, current.height)
+        ):
+            for view in views:
+                view.intrinsics = cached
+            return expected, cached
+        logger.warning(
+            "Cached rectified geometry (f=%.2f) does not match the current "
+            "run's intrinsics (f=%.2f); rebuilding the rectified images.",
+            cached.fx,
+            current.fx,
+        )
 
-    paths = undistort_run_images(views, output_dir, target_width=target_width)
+    paths = undistort_run_images(views, output_dir, target_width=target_width, overwrite=True)
     intr = views[0].intrinsics
     for view in views[1:]:
         if (view.intrinsics.width, view.intrinsics.height) != (intr.width, intr.height):
@@ -675,6 +699,15 @@ def run_dense(
                 if j in prior_maps
             ]
             near, far = depth_limits.get(index, ranges[index])
+            # Sky pixels are a prior-fill no-go zone: a monocular model gives
+            # the sky a smooth pseudo-depth that neighbouring priors agree on,
+            # so without this guard a horizon becomes a solid far-plane sheet.
+            avoid = edge_mask(images.get(index), config.prior_edge_guard_px)
+            if config.prior_sky_guard:
+                avoid = avoid | sky_mask(
+                    images.get(index),
+                    max_row_fraction=config.prior_sky_max_row_fraction,
+                )
             filled_estimate, filled = fill_from_prior(
                 estimate,
                 prior_maps[index],
@@ -685,7 +718,7 @@ def run_dense(
                 far,
                 min_support=config.prior_min_support,
                 tolerance=config.prior_tolerance,
-                avoid_edges=edge_mask(images.get(index), config.prior_edge_guard_px),
+                avoid_edges=avoid,
             )
             if filled:
                 filtered_in_memory[index] = filled_estimate.depth

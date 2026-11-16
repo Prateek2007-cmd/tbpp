@@ -353,3 +353,147 @@ for index in usable:
    matcher wiring + loop closure for the full 600-frame pass (the ribbon is partly drift),
    (d) Phase 4 coverage reporting. Phases 1-4 are still open.
 
+## 11. 2026-11-16 session: focal gate, matcher wiring, sky guard (uncommitted)
+
+User complaint (2026-11-16): "not getting proper accurate 3D reconstruction…
+go through the code, see what is breaking, fix it" for any single-pass drone
+video. Audit found three accuracy-breaking gaps, all fixed in the working tree
+(no commit, no push):
+
+1. **Phase 2 — focal-drift gate (was: nothing flagged it).** With
+   `refine_intrinsics=true` COLMAP's BA freely refined the focal and solved
+   f ~1159 px vs a 1024 px prior (+13%) on forward flight, absorbing a depth
+   stretch into the camera; `SfmRunner` only checked intrinsics when
+   refinement was *off*, the CLI only warned on aspect ratio, and
+   `run_video_pipeline.summarise()` never compared solved vs prior focal at
+   all. New `src/uav3d/sfm/focal_gate.py` (`solved_focal_px`,
+   `check_focal_drift`, `FocalDriftResult`); `SfmConfig.focal_drift_max_rel`
+   (default 0.10) and `focal_drift_action` (`warn` default, `fail` aborts);
+   `SfmRunResult` now carries `matcher_type`, `prior_focal_px`,
+   `solved_focal_px`, `focal_drift_rel`, `focal_drift_exceeded`; the SfM CLI
+   prints a Focal Drift row and warns when exceeded; `summarise()` prints the
+   gate verdict and marks the run WITH WARNINGS when exceeded. The gate
+   **flags, never clamps** the focal. Caveat: the video prior focal is a
+   0.8*width guess and can itself be off by tens of percent, so a flagged
+   drift can mean "the prior was wrong and BA fixed it" — check the
+   reprojection error and the trajectory before concluding the model is
+   stretched. Tests: `tests/test_focal_gate.py` (17 tests).
+2. **Phase 3 — matcher wiring (was: dead config).** `SfmConfig.matcher_type`
+   existed but `SfmRunner` never read it — every run was sequential, and an
+   unknown value would have silently run sequential anyway. New
+   `SfmRunner.match_features()` dispatches `sequential` (default) and
+   `exhaustive` (every pair — the loop-closure mode for passes that revisit
+   ground, at O(n^2) cost); unknown values raise `Uav3dError`. CLI gained
+   `uav3d sfm --matcher`. pycolmap 3.12.6 exposes no pair-list matcher, so
+   explicit start/end loop pairs are not available in this binding.
+3. **Phase 1 — sky guard for the prior fill (was: none).** `fill_from_prior`
+   only required neighbour-prior agreement, which smooth sky pseudo-depth
+   passes, so a visible horizon would be filled as a solid far-plane sheet.
+   New `dense/prior.py::sky_mask` (top 35% of frame, bright + desaturated +
+   low gradient) and `DenseConfig.prior_sky_guard` (default True);
+   `run_dense` ORs the sky mask into the fill's avoid-mask. Tests in
+   `tests/test_prior.py` (sky band masked, textured ground/roof not masked,
+   fill respects the mask).
+4. **Bugfix:** `scripts/run_video_pipeline.py::summarise()` referenced an
+   undefined `calibration` in its `poses is None` branch — the trustworthiness
+   report itself crashed with `NameError` on exactly the path where SfM
+   produced no poses. Fixed to use the stored calibration; verified by
+   calling `summarise` with `poses=None` (no crash) and with a +13% drifted
+   focal (WARNINGS) vs a +4% focal (usable).
+
+Tests after the fix (this Linux container; the user's Windows `.venv`
+previously reported 158 passed): `pytest -q` excluding the two open3d-only
+modules (`test_completion.py`, `test_lod2.py` — open3d cannot import here,
+`libEGL.so.1` is missing from the container) gives **162 passed, 6 failed**;
+the 6 failures are pre-existing and data-dependent (they need the untracked
+`data/outputs/run_20260914_112220` and Zurich files, absent from the clone).
+New tests: `test_focal_gate.py`, 4 sky tests in `test_prior.py`, 1 config
+test in `test_dense_pipeline.py`.
+
+Still open: Phase 4 coverage reporting; a real-drone-video end-to-end run
+(the synthetic street-canyon video run was started for verification — see
+`data/benchmark/flyover.mp4` and `~/workspace/tmp/check_traj.py`, which scores
+the SfM trajectory against the analytic flight with Umeyama Sim(3)); whether
+`refine_intrinsics=false` (locked prior focal) beats free focal on forward
+flight — compare reprojection error and trajectory error before changing the
+video config default.
+
+## 12. 2026-11-16 (continued): two stale-cache bugs + focal experiment
+
+The synthetic verification above produced the two most important findings
+of the session — both are fixed in the working tree, both were silent
+accuracy killers, and neither is visible in reprojection error.
+
+**Synthetic ground truth.** `scripts/render_street_video.py` renders a
+60-frame 480x270 street-canyon flyover with known cameras
+(`scripts/synthetic_street.py::flight`, step 1.36 m, height 12 m,
+pitch -0.12) and true focal 265 px; `data/benchmark/flyover.mp4` +
+`flyover.depth.npy` (GT depth per frame) are the artefacts. Scoring uses
+an orientation-aware Sim(3) alignment (rotation from the frame-0
+quaternions, scale from centre spread) — a plain Umeyama fit on the
+camera centres is degenerate because the flight is a straight line and
+its roll around the flight axis is unconstrained. Scores below are raw
+COLMAP sparse points / fused cloud vs 100k GT surface samples; the GT
+sampling floor is ~0.3 m, so ~0.5 m median is "correct" here.
+
+**Focal experiment (all 60/60 registered, reproj 0.28–0.38 px):**
+
+| SfM setting | solved f | centre err (med) | sparse median acc | prec@0.5 m |
+|---|---|---|---|---|
+| free focal, default config (run 1) | 447 px | 0.035 m | — (not scored cleanly) | — |
+| free focal (run 2, same data) | 492 px | 0.039 m | 4.32 m | 0.000 |
+| locked prior focal 384 px | 384 px | 1.19 m | 3.84 m | 0.001 |
+| locked TRUE focal 265 px | 265 px | 0.040 m | 0.47 m | 0.54 |
+
+Conclusions: (1) the 0.8*width prior (384 px) is 45% off the true focal
+on this clip, and **neither** free refinement **nor** locking the wrong
+value fixes the geometry — reproj error stays ~0.28 px and the
+trajectory looks fine while the points are metres off (bas-relief:
+focal error is absorbed into depth, invisible to reproj error).
+(2) Free refinement is unstable: identical data solved 447 px once and
+492 px the next run. (3) Only the true focal gives a sub-metre model.
+**The pipeline's accuracy on forward flight is focal-limited, not
+matcher- or dense-limited.** For real footage the fix is a real focal
+(EXIF / sensor spec / a calibration capture), not more BA freedom.
+The focal gate (Phase 2, §11) is what makes this visible instead of
+silent. Caveat: this synthetic is a hard case (narrow FOV, pure forward
+flight); wider-FOV oblique drone footage constrains focal better.
+
+**Bug A — stale rectified geometry cache (the bigger one).**
+`dense/pipeline.py::_load_or_build_rectified` reused
+`dense/rectified/geometry.json` + PNGs whenever they existed, without
+checking them against the current run's intrinsics. After an SfM re-run
+with a new focal, dense silently ran the plane sweep and fusion with
+the OLD focal while the summary reported the new one. Measured on the
+synthetic: geometry.json held f=446.98 from the first run while
+poses.json said f=265; the fused cloud was laterally compressed by
+265/447 = 0.59 (walls at y=±5.4 instead of ±9) and scored median
+accuracy **3.73 m, precision@0.5 m = 0**. Fix: the loader now compares
+the cached geometry with the current views' intrinsics and rebuilds
+(`overwrite=True`) on mismatch, logging a warning. After the fix the
+same true-focal run scores median accuracy **0.46 m, precision@0.5 m
+0.55, precision@1 m 0.96**, valid depth 42.5% → 52.3%, fused points
+97,582 → 191,800. Test:
+`test_rectified_cache_rebuilds_when_focal_changes`.
+
+**Bug B — stale sparse-points cache.** `dense/geometry.py::
+load_sparse_points` preferred `sparse_points.npz` over the COLMAP
+model, but the npz is only written by the dense stage, so after an
+SfM re-run dense derived its depth ranges from the PREVIOUS
+reconstruction. (This also corrupted the first scoring attempts in
+this session — the "3.5 m" numbers for the locked variants were stale
+npz scored against new poses.) Fix: prefer the COLMAP model, npz only
+as fallback. Test: `test_load_sparse_points_prefers_fresh_colmap_over_stale_npz`
+(fake pycolmap module; building a real COLMAP model via the 3.12 API
+in a test was not worth the rig/frame ceremony).
+
+**Scoring traps found while verifying (do not repeat them):**
+- Score RAW COLMAP points (`colmap/sparse/0`), never `sparse_points.npz`
+  after any re-run.
+- Align with orientations, not centres-only Umeyama, on straight flights.
+- The dense `depth/` maps can be accurate (0.7% vs GT depth here) while
+  the fused cloud is wrong — always score the cloud, not just the maps.
+- `cloud_metrics` completeness is low by construction on this scene
+  (GT samples include unobserved backs of buildings); use accuracy /
+  precision on the observed surfaces as the primary signal.
+

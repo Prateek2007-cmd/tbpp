@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -47,8 +47,33 @@ class SfmConfig(BaseModel):
     seq_overlap: int = Field(default=10, ge=1, description="Sequential matching overlap window")
     max_image_size: int = Field(default=1600, gt=0, description="Maximum image dimension for feature extraction")
     refine_intrinsics: bool = Field(default=False, description="Whether to refine camera intrinsics during bundle adjustment")
+    focal_drift_max_rel: float = Field(
+        default=0.10,
+        ge=0.0,
+        description=(
+            "Largest absolute relative focal drift (solved vs prior focal) that passes "
+            "the focal-drift gate. Forward flight trades focal length against depth, "
+            "so a solved focal far from the prior usually means a depth stretch was "
+            "absorbed into the camera. The gate only flags it; it never clamps the focal."
+        ),
+    )
+    focal_drift_action: Literal["warn", "fail"] = Field(
+        default="warn",
+        description=(
+            "What the focal-drift gate does when exceeded: 'warn' records the drift "
+            "and continues, 'fail' aborts the SfM run."
+        ),
+    )
     feature_type: str = Field(default="SIFT", description="Feature extractor type")
-    matcher_type: str = Field(default="sequential", description="COLMAP matcher type (sequential or exhaustive)")
+    matcher_type: str = Field(
+        default="sequential",
+        description=(
+            "COLMAP matcher type: 'sequential' (each frame matched to its temporal "
+            "neighbours — fast, but drift accumulates over a long pass with no loop "
+            "closure) or 'exhaustive' (every pair matched, which closes loops when "
+            "the flight revisits an area, at O(n^2) matching cost)."
+        ),
+    )
     min_num_matches: int = Field(default=15, ge=1, description="Minimum inlier matches for pair")
     init_min_inliers: int = Field(default=15, ge=1, description="Minimum inliers for initial pair")
     init_min_tri_angle: float = Field(default=2.0, ge=0.0, description="Minimum triangulation angle for initial pair in degrees")

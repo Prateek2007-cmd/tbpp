@@ -388,6 +388,8 @@ def _handle_sfm_command(args: argparse.Namespace) -> int:
         # 4. Optional CLI overrides
         if getattr(args, "overlap", None) is not None:
             cfg.sfm.seq_overlap = args.overlap
+        if getattr(args, "matcher", None) is not None:
+            cfg.sfm.matcher_type = args.matcher
 
         # 5. Execute SfM
         runner = SfmRunner(config=cfg.sfm)
@@ -440,12 +442,29 @@ def _handle_sfm_command(args: argparse.Namespace) -> int:
             "Intrinsics Locked",
             f"{poses_file.camera.params if poses_file.camera else calibration.params}",
         )
+        table.add_row("Matcher", f"{result.matcher_type}")
+        if result.prior_focal_px is not None and result.solved_focal_px is not None:
+            drift_pct = 100.0 * (result.focal_drift_rel or 0.0)
+            drift_style = "bold red" if result.focal_drift_exceeded else "bold green"
+            table.add_row(
+                "Focal Drift",
+                f"[{drift_style}]{result.prior_focal_px:.1f} -> "
+                f"{result.solved_focal_px:.1f} px ({drift_pct:+.1f}%)[/{drift_style}]",
+            )
 
         console.print(table)
 
         if result.registration_rate < 0.85:
             console.print(
                 "[yellow]Warning: Registration rate below 85% KPI. Consider increasing sequential overlap or adjusting keyframe stride.[/yellow]"
+            )
+        if result.focal_drift_exceeded:
+            console.print(
+                "[yellow]Warning: Focal-drift gate exceeded — the solved focal moved "
+                f"{100.0 * (result.focal_drift_rel or 0.0):+.1f}% from the prior. "
+                "Forward flight trades focal length against depth, so the model may "
+                "be stretched along the flight axis. Consider re-running with "
+                "refine_intrinsics=false.[/yellow]"
             )
         else:
             console.print(
@@ -816,6 +835,13 @@ def create_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Override sequential matching overlap window",
+    )
+    sfm_parser.add_argument(
+        "--matcher",
+        type=str,
+        choices=["sequential", "exhaustive"],
+        default=None,
+        help="Override matcher: sequential (default) or exhaustive (closes loops on revisits, O(n^2))",
     )
 
     # 4. sync
