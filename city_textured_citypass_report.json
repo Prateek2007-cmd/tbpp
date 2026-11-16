@@ -1,0 +1,21 @@
+{
+  "run_dir": "C:\\Users\\Preetam\\Desktop\\TBP\\data\\outputs\\run_20261115_103633",
+  "dense_dir": "C:\\Users\\Preetam\\Desktop\\TBP\\data\\outputs\\run_20261115_103633\\dense",
+  "mesh": "C:\\Users\\Preetam\\Desktop\\TBP\\data\\outputs\\run_20261115_103633\\dense\\mesh.obj",
+  "vertices": 194871,
+  "faces": 337686,
+  "assigned_vertices": 185331,
+  "assigned_fraction": 0.951,
+  "unique_views_used": 250,
+  "bbox_min": [
+    -3.49,
+    -7.188,
+    -0.256
+  ],
+  "bbox_max": [
+    3.269,
+    8.203,
+    3.097
+  ],
+  "output": "city_textured_citypass.glb"
+}

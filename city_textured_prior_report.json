@@ -1,0 +1,21 @@
+{
+  "run_dir": "C:\\Users\\Preetam\\Desktop\\TBP\\data\\outputs\\run_20261113_055317",
+  "dense_dir": "C:\\Users\\Preetam\\Desktop\\TBP\\data\\outputs\\run_20261113_055317\\dense_prior",
+  "mesh": "C:\\Users\\Preetam\\Desktop\\TBP\\data\\outputs\\run_20261113_055317\\dense_prior\\mesh.obj",
+  "vertices": 183354,
+  "faces": 282659,
+  "assigned_vertices": 171091,
+  "assigned_fraction": 0.9331,
+  "unique_views_used": 250,
+  "bbox_min": [
+    -8.078,
+    -11.64,
+    -0.764
+  ],
+  "bbox_max": [
+    7.418,
+    11.72,
+    5.978
+  ],
+  "output": "city_textured_prior.glb"
+}
