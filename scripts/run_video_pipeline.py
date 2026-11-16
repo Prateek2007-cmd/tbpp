@@ -36,6 +36,7 @@ import cv2  # noqa: E402
 from uav3d.cli import main  # noqa: E402
 from uav3d.dense.evaluate import load_ply_points  # noqa: E402
 from uav3d.models.calibration_io import read_calibration  # noqa: E402
+from uav3d.sfm.focal_gate import check_focal_drift, solved_focal_px  # noqa: E402
 
 
 def _host_fs_path(path: Path) -> Path:
@@ -135,16 +136,35 @@ def summarise(video: Path, info: dict, run_dir: Path, poses: dict | None, dense:
                 print(f"  WARNING  aspect ratio {ratio:.3f} is not physical; "
                       "shape will be stretched along one image axis")
                 ok = False
+        # Focal-drift gate (Phase 2): forward flight trades focal length
+        # against depth, so a solved focal far from the keyframes-stage prior
+        # usually means a depth stretch was absorbed into the camera. The
+        # gate flags it; it never clamps the focal.
+        if stored is not None:
+            try:
+                gate = check_focal_drift(
+                    solved_focal_px(stored.model, list(stored.params)),
+                    solved_focal_px(model, list(solved["params"])),
+                    max_rel_drift=0.10,
+                )
+                print(f"          focal drift {gate.message}")
+                if gate.exceeded:
+                    print("  WARNING  focal drift exceeds the 10% gate; the model "
+                          "may be stretched along the flight axis — consider "
+                          "re-running with refine_intrinsics=false")
+                    ok = False
+            except ValueError as exc:
+                print(f"  WARNING  focal-drift gate could not be evaluated: {exc}")
     elif stored is not None:
         params = ", ".join(f"{v:.2f}" for v in stored.params)
         aspect = (
             "1.000 (single focal)"
-            if calibration.model.upper().endswith("SIMPLE_PINHOLE")
-            else f"{calibration.params[0] / calibration.params[1]:.3f}"
+            if stored.model.upper().endswith("SIMPLE_PINHOLE")
+            else f"{stored.params[0] / stored.params[1]:.3f}"
         )
-        print(f"CAMERA    {calibration.model} [{params}]  aspect {aspect}")
-        if not calibration.model.upper().endswith("SIMPLE_PINHOLE"):
-            ratio = calibration.params[0] / calibration.params[1]
+        print(f"CAMERA    {stored.model} [{params}]  aspect {aspect}")
+        if not stored.model.upper().endswith("SIMPLE_PINHOLE"):
+            ratio = stored.params[0] / stored.params[1]
             if abs(ratio - 1.0) > 0.05:
                 print(f"  WARNING  aspect ratio {ratio:.3f} is not physical; "
                       "shape will be stretched along one image axis")

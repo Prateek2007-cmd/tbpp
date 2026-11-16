@@ -8,6 +8,8 @@ against it directly.
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import cv2
@@ -221,3 +223,98 @@ def test_intrinsics_roundtrip() -> None:
     assert matrix[1, 2] == HEIGHT / 2.0
     scaled = intrinsics.scaled(0.5)
     assert scaled.fx == pytest.approx(FOCAL * 0.5)
+
+
+def test_prior_sky_guard_defaults_on() -> None:
+    """Phase 1 sky guard: prior fill must refuse sky pixels unless opted out."""
+    cfg = DenseConfig()
+    assert cfg.prior_sky_guard is True
+    assert cfg.prior_sky_max_row_fraction == 0.35
+    assert DenseConfig(prior_sky_guard=False).prior_sky_guard is False
+
+
+def test_load_sparse_points_prefers_fresh_colmap_over_stale_npz(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: after an SfM re-run the npz cache is stale; the COLMAP
+    model must win, otherwise dense depth ranges come from the old run."""
+    from uav3d.dense.geometry import load_sparse_points
+
+    run_dir = tmp_path / "run"
+    (run_dir / "colmap" / "sparse" / "0").mkdir(parents=True)
+    stale = np.array([[100.0, 100.0, 100.0]], dtype=np.float64)
+    np.savez(run_dir / "sparse_points.npz", points=stale)
+
+    fresh = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float64)
+
+    class _FakePoint:
+        def __init__(self, xyz: np.ndarray) -> None:
+            self.xyz = xyz
+
+    class _FakeReconstruction:
+        def __init__(self, path: str) -> None:
+            assert "colmap" in path
+            self.points3D = {i: _FakePoint(p) for i, p in enumerate(fresh)}
+
+    monkeypatch.setitem(sys.modules, "pycolmap", types.SimpleNamespace(Reconstruction=_FakeReconstruction))
+
+    assert np.allclose(load_sparse_points(run_dir), fresh)
+
+    # No COLMAP model: the npz cache is the fallback.
+    (run_dir / "colmap").rename(run_dir / "colmap_gone")
+    assert np.allclose(load_sparse_points(run_dir), stale)
+
+    # Neither: None.
+    (run_dir / "sparse_points.npz").unlink()
+    assert load_sparse_points(run_dir) is None
+
+
+def test_rectified_cache_rebuilds_when_focal_changes(tmp_path: Path) -> None:
+    """Regression: a dense re-run after SfM solved a new focal must not
+    reuse the previous run's rectified geometry (that ran the whole dense
+    stage with the old focal while the summary reported the new one)."""
+    from uav3d.dense.cameras import CameraView, Intrinsics
+    from uav3d.dense.pipeline import _load_or_build_rectified
+
+    img = np.zeros((270, 480, 3), dtype=np.uint8)
+    img[100:170, 200:280] = 255
+    src_dir = tmp_path / "images"
+    src_dir.mkdir()
+    paths = []
+    for i in range(3):
+        p = src_dir / f"frame_{i}.jpg"
+        cv2.imwrite(str(p), img)
+        paths.append(p)
+
+    def _views(focal: float) -> list[CameraView]:
+        intr = Intrinsics(fx=focal, fy=focal, cx=240.0, cy=135.0, width=480, height=270)
+        views = [
+            CameraView(
+                index=i,
+                frame_id=f"video_{i:06d}",
+                image_path=paths[i],
+                R=np.eye(3),
+                t=np.zeros(3),
+                intrinsics=intr,
+            )
+            for i in range(3)
+        ]
+        # build_views() normally stashes these on the view objects.
+        for view in views:
+            view._native_intrinsics = intr  # type: ignore[attr-defined]
+            view._distortion = np.zeros(0)  # type: ignore[attr-defined]
+        return views
+
+    out_dir = tmp_path / "rectified"
+    # First run with the old focal: builds the cache.
+    _, intr_old = _load_or_build_rectified(_views(447.0), out_dir, target_width=640)
+    assert intr_old.fx == 447.0
+
+    # Second run after SfM re-solved the focal: the cache must rebuild.
+    _, intr_new = _load_or_build_rectified(_views(265.0), out_dir, target_width=640)
+    assert intr_new.fx == 265.0
+    assert json.loads((out_dir / "geometry.json").read_text())["fx"] == 265.0
+
+    # Third run with the same focal: the cache is reused, not rebuilt.
+    _, intr_cached = _load_or_build_rectified(_views(265.0), out_dir, target_width=640)
+    assert intr_cached.fx == 265.0
