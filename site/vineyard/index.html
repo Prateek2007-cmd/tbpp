@@ -140,7 +140,7 @@
   <div class="stat"><span>Reprojection error</span><b>0.791 px</b></div>
   <div class="stat"><span>Sparse points</span><b>39,449</b></div>
   <div class="stat"><span>Dense points</span><b>9,842,410</b></div>
-  <div class="stat"><span>Mesh (local file)</span><b>765,723 verts · 1,000,000 faces</b></div>
+  <div class="stat"><span>Mesh (local file)</span><b>524,476 verts · 650,000 faces</b></div>
   <div class="stat"><span>Depth valid</span><b>30.4%</b></div>
   <div class="section">Accuracy vs ground truth</div>
   <div class="stat"><span>Median error</span><b>not measured</b></div>
@@ -167,7 +167,7 @@
   <div class="stat"><span>consistency</span><b>22.9 s</b></div><div class="stat"><span>fusion</span><b>58.1 s</b></div><div class="stat"><span>mesh</span><b>0.0 s</b></div><div class="stat"><span>mvs</span><b>1h 05m</b></div><div class="stat"><span>prepare</span><b>0.1 s</b></div><div class="stat"><span>view_selection</span><b>0.5 s</b></div>
   <p class="note">Dense timings from the probe-config MVS sweep in this run (60 reference views); the final stride-1 fusion (119 views, 9,842,410 points) took 307.9 s.</p>
   <div class="section">Downloads</div>
-  <p class="note"><a href="dense/mesh_textured.glb" download>mesh_textured.glb</a> — decimated textured mesh, 33.4 MB (765,723 verts · 1,000,000 faces; full 126.2 MB version on the public link)<br><a href="dense/georef.json" download>georef.json</a> — georeferencing frame (EPSG:32629)<br><a href="map/">View on map &#8599;</a> — flight path + model footprint on OpenStreetMap</p>
+  <p class="note"><a href="dense/mesh_textured.glb" download>mesh_textured.glb</a> — decimated textured mesh, 22.5 MB (524,476 verts · 650,000 faces; full 126.2 MB version on the public link)<br><a href="dense/georef.json" download>georef.json</a> — georeferencing frame (EPSG:32629)<br><a href="map/">View on map &#8599;</a> — flight path + model footprint on OpenStreetMap</p>
   <div class="section">Honest limits</div>
   <p class="note">The model has genuine holes — the middle of the strip is thinner than the ends, with gaps where no two views had valid depth. Nothing was invented to fill them. Dense depth reached 32.6% of measurable pixels vs a 50% target (forward-looking camera: ~25% of each frame is sky). The flight is near-collinear, so the GPS residual is a lower bound on true metric error.</p>
 </aside>
