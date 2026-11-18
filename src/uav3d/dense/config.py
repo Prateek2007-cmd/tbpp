@@ -237,9 +237,17 @@ class DenseConfig(BaseModel):
     # --- meshing ------------------------------------------------------------
     mesh: bool = Field(default=True, description="Reconstruct a triangle mesh from the fused points")
     mesh_voxel_fraction: float = Field(
-        default=1.5,
+        default=5.0,
         gt=0.0,
-        description="Mesh voxel size as a multiple of the fusion voxel",
+        description=(
+            "Mesh voxel size as a multiple of the fusion voxel. The old "
+            "default (1.5) produced a 3.36M-vertex / 162 MB GLB on the "
+            "acceptance run — too heavy to demo and enough to OOM the "
+            "mesher on a 4M-point cloud. 5.0 mirrors the proven UAVLight "
+            "direct-mesh ratio (~3.3x coarser than the old default), which "
+            "yielded an 820k-vertex / 38.6 MB GLB that renders in ~6 s. "
+            "The 4x point-spacing floor in pipeline.py still applies."
+        ),
     )
     mesh_tile_units: float | None = Field(
         default=None,
@@ -261,6 +269,17 @@ class DenseConfig(BaseModel):
         default=None,
         gt=0.0,
         description="Metric scale (metres per SfM unit) when scale_source is 'fixed'",
+    )
+    gnss_reject_k_mad: float = Field(
+        default=5.0,
+        gt=0.0,
+        description=(
+            "Outlier rejection for the GNSS scale fit (scale_source='gnss'): after an "
+            "initial Umeyama fit, GPS fixes whose alignment residual exceeds "
+            "median + k * MAD are rejected and the fit is re-run on the inliers. "
+            "The rejected count is reported in the dense report; the fit never "
+            "silently runs through bad fixes."
+        ),
     )
 
     # --- runtime ------------------------------------------------------------

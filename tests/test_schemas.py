@@ -1,5 +1,7 @@
 """Tests for uav3d schemas, config loading, and CLI commands."""
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -175,7 +177,17 @@ class TestCliSmoke:
 
     @pytest.mark.parametrize("subcommand", ["inspect", "keyframes", "sfm", "sync", "validate"])
     def test_subcommand_stub_execution(self, subcommand: str) -> None:
+        # These smoke tests run the real CLI against the Zurich dataset and
+        # (for sync/validate) a recorded SP-1 run directory. Neither is in
+        # the clone — both are untracked local data — so skip cleanly when
+        # they are absent instead of failing on a fresh checkout.
+        zurich_dir = Path("data/raw/zurich_mav")
+        if not zurich_dir.is_dir():
+            pytest.skip(f"Zurich dataset not present: {zurich_dir} (untracked local data)")
         cmd = [subcommand, "--config", "configs/zurich_baseline.yaml"]
         if subcommand in {"sync", "validate"}:
-            cmd.extend(["--run-dir", "data/outputs/run_20260914_112220"])
+            run_dir = Path("data/outputs/run_20260914_112220")
+            if not run_dir.is_dir():
+                pytest.skip(f"SP-1 run directory not present: {run_dir} (untracked local data)")
+            cmd.extend(["--run-dir", str(run_dir)])
         assert main(cmd) == 0

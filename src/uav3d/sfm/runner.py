@@ -269,6 +269,11 @@ class SfmRunner:
         pipeline_opts.mapper.abs_pose_min_num_inliers = self.config.abs_pose_min_inliers
         pipeline_opts.min_model_size = self.config.min_model_size
         pipeline_opts.ignore_watermarks = self.config.ignore_watermarks
+        # Global-BA cadence (Phase 5): the COLMAP defaults (1.1/1.1) trigger
+        # a full global BA after nearly every frame on feature-dense scenes
+        # (see SfmConfig.ba_global_*_ratio). Local BA still runs per frame.
+        pipeline_opts.ba_global_frames_ratio = self.config.ba_global_frames_ratio
+        pipeline_opts.ba_global_points_ratio = self.config.ba_global_points_ratio
 
         try:
             reconstructions = pycolmap.incremental_mapping(

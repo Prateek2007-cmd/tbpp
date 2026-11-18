@@ -32,6 +32,12 @@ def write_calibration(calibration: CameraCalibration, run_dir: str | Path) -> Pa
         "height": int(calibration.height),
         "params": [float(value) for value in calibration.params],
         "source": calibration.source,
+        # Focal provenance (measured / exif / sensor_spec / guessed) — the
+        # run manifest must say how the focal was obtained, because a guessed
+        # focal on forward flight can stretch the whole model while
+        # reprojection error stays low. Older files without the key read back
+        # as "unknown".
+        "provenance": calibration.provenance,
     }
     dest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return dest
@@ -53,6 +59,7 @@ def read_calibration(run_dir: str | Path) -> CameraCalibration | None:
             height=int(payload["height"]),
             params=[float(value) for value in payload["params"]],
             source=str(payload.get("source", "run_calibration")),
+            provenance=str(payload.get("provenance", "unknown")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise DataError(f"Incomplete calibration file {path}: {exc}") from exc

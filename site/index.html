@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>tbpp — SIH 2026 PS 26158 · Drone video to accurate 3D model</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
+<style>
+  :root {
+    --paper: #f4f2ee; --card: #ffffff; --ink: #1c1917; --muted: #78716c;
+    --line: #e7e2d9; --accent: #0f766e; --accent-soft: #e6f2f0;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    background: var(--paper); color: var(--ink);
+    min-height: 100vh; padding: 48px 20px 32px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .badge {
+    display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--accent); background: var(--accent-soft);
+    border: 1px solid #c8e3df; border-radius: 20px; padding: 4px 11px;
+  }
+  h1 { font-size: 30px; letter-spacing: -0.5px; margin: 16px 0 8px; line-height: 1.2; }
+  .sub { font-size: 16px; color: var(--muted); line-height: 1.55; max-width: 640px; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 32px; }
+  @media (max-width: 640px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+    padding: 22px 24px; box-shadow: 0 8px 30px rgba(28,25,23,.06);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .card .tag { font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--accent); }
+  .card h2 { font-size: 19px; letter-spacing: -0.2px; }
+  .card p { font-size: 14px; line-height: 1.55; color: var(--muted); flex: 1; }
+  .stats { display: flex; gap: 18px; flex-wrap: wrap; margin: 4px 0; }
+  .stats div { font-size: 13px; }
+  .stats b { display: block; font-size: 17px; font-family: ui-monospace, Menlo, monospace; }
+  .stats span { color: var(--muted); font-size: 12px; }
+  .btn {
+    display: inline-block; text-align: center; text-decoration: none;
+    background: var(--accent); color: #fff; font-weight: 700; font-size: 14px;
+    padding: 11px 18px; border-radius: 24px; margin-top: 6px;
+  }
+  .btn:hover { background: #0d5f59; }
+  .btn.ghost { background: transparent; color: var(--accent);
+    border: 1.5px solid var(--accent); }
+  .btn.ghost:hover { background: var(--accent-soft); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row .btn { flex: 1; }
+  footer { margin-top: 36px; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+  footer code { background: #fff; border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="badge">SIH 2026 &middot; NTRO PS-26158</span>
+  <h1>Single-pass drone video &rarr; accurate 3D model</h1>
+  <p class="sub">One drone video in, one georeferenced, metrically accurate textured
+  3D model out. Two results below: the city flyover shows the reconstruction,
+  the vineyard shows the georeferencing proof.</p>
+
+  <div class="cards">
+    <div class="card">
+      <div class="tag">Reconstruction</div>
+      <h2>City flyover</h2>
+      <p>Synthetic city, 20-second flight. The full interpolated surface —
+      buildings, roads, cars — in colour.</p>
+      <div class="stats">
+        <div><b>250/250</b><span>frames registered</span></div>
+        <div><b>0.37 px</b><span>reprojection error</span></div>
+        <div><b>1.15 m</b><span>median error vs GT</span></div>
+      </div>
+      <a class="btn" href="city/">Open the 3D city model</a>
+    </div>
+
+    <div class="card">
+      <div class="tag">Georeferencing proof</div>
+      <h2>GrapeSLAM vineyard</h2>
+      <p>Phantom 4 RTK, 4K video + xlsx telemetry through vineyard rows.
+      GPS-pinned to 4.9 cm — the model sits on the real map.</p>
+      <div class="stats">
+        <div><b>0.049 m</b><span>GPS residual, median</span></div>
+        <div><b>119/120</b><span>frames registered</span></div>
+        <div><b>EPSG:32629</b><span>UTM 29N</span></div>
+      </div>
+      <div class="row">
+        <a class="btn" href="vineyard/">Open the 3D model</a>
+        <a class="btn ghost" href="vineyard/map/">View on map</a>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Running this locally: from the <code>site/</code> folder, run
+    <code>python -m http.server 8000</code> and open
+    <code>http://localhost:8000</code>. The 3D viewers work offline (three.js is
+    bundled); the map needs internet for its base-map tiles. The models here
+    are decimated copies for GitHub's 100 MB file limit — the full-resolution
+    versions are on the public links.
+  </footer>
+</div>
+</body>
+</html>

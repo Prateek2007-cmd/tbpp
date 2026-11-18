@@ -1,5 +1,12 @@
 """Unit tests for UAV 3D reconstruction completion engine.
 
+QUARANTINED (Phase 4, 2026-11-17): the module under test
+(``uav3d.modeling.legacy.completion``) invents geometry — symmetry completion,
+wall extrusion, terrain inpainting — and is NOT used by the pipeline. These
+tests are kept so the quarantined code stays characterised, and skip cleanly
+where ``open3d`` is unavailable. The viewer test that used to live here moved
+to ``tests/test_viewer.py`` (the viewer is now wired to the real pipeline).
+
 Verifies:
 - Ground plane and elevated structure decomposition
 - Continuous terrain inpainting across occlusion gaps
@@ -14,10 +21,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import open3d as o3d
 import pytest
 
-from uav3d.modeling.completion import (
+o3d = pytest.importorskip("open3d", reason="open3d not installed; quarantined completion tests need it")
+
+from uav3d.modeling.legacy.completion import (
     build_full_3d_map,
     complete_structure_volume,
     decompose_scene,
@@ -138,14 +146,6 @@ def test_build_full_3d_map(tmp_path: Path):
     assert len(mesh.triangles) > 0
 
 
-def test_generate_viewer_html(tmp_path: Path):
-    from uav3d.modeling.dashboard import generate_viewer_html
-
-    viewer_html = generate_viewer_html(tmp_path)
-    assert viewer_html.exists()
-    content = viewer_html.read_text(encoding="utf-8")
-    assert "<!DOCTYPE html>" in content
-    assert "Three.js" in content or "THREE." in content
-    assert "map_3d.glb" in content
-    assert "orthomosaic.png" in content
-    assert "dsm_elevation.png" in content
+# NOTE (Phase 4): the viewer test that lived here moved to tests/test_viewer.py —
+# the viewer is now wired to the real pipeline (dense/mesh.glb), not to the
+# quarantined completion outputs.

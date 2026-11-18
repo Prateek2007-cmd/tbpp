@@ -1,0 +1,88 @@
+# Configuration for PinPoint flight02 (Phase 5 — second video, same format,
+# different flight + different sync offset).
+#
+# Dataset: PinPoint flight02, Zenodo record 23214783 (DOI 10.5281/zenodo.23214783),
+# CC BY 4.0. Real Sentinel fixed-wing VTOL flight, 19 min, 1280x720 @ 60 fps
+# (68,766 frames); ArduPilot DataFlash log with 5,882 GPS fixes at 5 Hz.
+# Path: ~/workspace/tbpp-data/more-videos/pinpoint-flight02/ — see
+# ~/workspace/tbpp-data/VIDEO_SOURCES.md.
+#
+# Focal: same camera as flight01 — focal_px 876.7 (focal_norm 0.6849 x 1280).
+# refine_intrinsics FALSE (see configs/pinpoint_flight01.yaml).
+#
+# !!! SYNC OFFSET IS PER-FLIGHT: flight02 is 49.4 s (flight01 was 1.2 s).
+# The offset is deliberately NOT set here: the parser reads it from
+# campaign.json next to the .BIN (config.sync.offset_s = 49.4). The Phase 5
+# run verifies the auto-discovery in the sync log / telemetry.json
+# (offset_us must be 49,400,000) — this is the anti-hardcoding proof.
+# sync.max_delta_us 150 ms (5 Hz GPS, same reasoning as flight01).
+#
+# Breadth run: max_frames 80 (not 250) to bound SfM wall time; 60 s window
+# frames 7200-10800 (t=120-180 s; frame 9000 visually confirmed airborne
+# nadir over river/vegetation, good texture).
+#
+# Run:
+#   python scripts/run_video_pipeline.py --video \
+#     /home/hatch/workspace/tbpp-data/more-videos/pinpoint-flight02/test_flight02_visible.mkv \
+#     --config configs/pinpoint_flight02.yaml --start-frame 7200 --end-frame 10800 \
+#     --telemetry /home/hatch/workspace/tbpp-data/more-videos/pinpoint-flight02/test_flight02.BIN \
+#     --stage sfm
+# Dense only if the GPS-residual median is < 10 m (see Phase 5 task).
+
+data_dir: "./data"
+dataset_label: "PinPoint flight02 (Zenodo 23214783, CC BY 4.0) — real VTOL video + ArduPilot GPS"
+
+source:
+  type: "video"
+  video_path: "/home/hatch/workspace/tbpp-data/more-videos/pinpoint-flight02/test_flight02_visible.mkv"
+  count: 300
+  stride: 1
+
+keyframes:
+  strategy: "laplacian_variance"
+  stride: 1
+  # 80 (not 250): breadth run, time-bounded — 80 frames still proves
+  # registration, reproj, sync match rate and the GPS residual, and keeps
+  # SfM inside the Phase 5 night window (120-frame 1080p SfM ran long).
+  max_frames: 80
+  min_blur: 40.0
+  max_clipping: 0.65
+  max_gap: 20
+  orb_features: 2000
+
+sfm:
+  camera_model: "SIMPLE_PINHOLE"
+  single_camera: true
+  seq_overlap: 15
+  max_image_size: 1600
+  refine_intrinsics: false
+  # Same camera as flight01 (OpenSfM self-calibration, campaign.json):
+  # focal_norm 0.6849 * 1280 px = 876.7 px. Locked, never refined.
+  focal_px: 876.7
+  feature_type: "SIFT"
+  matcher_type: "sequential"
+  min_num_matches: 20
+  init_min_inliers: 20
+  init_min_tri_angle: 3.0
+  abs_pose_min_inliers: 12
+  # Global-BA cadence 2.0 (not the 1.1 default): same guard as KABR —
+  # the default can trigger a global BA after nearly every frame on
+  # feature-dense scenes (measured on KABR 2026-11-17). 2.0 => BA when the
+  # model doubles + the final global BA; local BA still runs per frame.
+  ba_global_frames_ratio: 2.0
+  ba_global_points_ratio: 2.0
+
+sync:
+  max_delta_us: 150000
+  strategy: "nearest"
+  # No dataflash_sync_offset_us here — deliberately. The parser reads the
+  # per-flight offset from campaign.json next to the .BIN (49.4 s for
+  # flight02) and fails loudly if it cannot find one.
+
+validation:
+  alignment: "sim3"
+  ate_threshold_meters: 5.0
+
+dense:
+  scale_source: "gnss"
+  gnss_reject_k_mad: 5.0

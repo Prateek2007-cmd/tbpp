@@ -7,6 +7,7 @@ from pathlib import Path
 
 import cv2
 
+from uav3d.calibration.focal import FocalSpec, resolve_focal
 from uav3d.exceptions import DataError, Uav3dError
 from uav3d.models.frames import CameraCalibration, FrameRecord
 from uav3d.sources.base import ImageSource, SourceMetadata
@@ -22,8 +23,13 @@ class VideoFileSource(ImageSource):
         video_path: str | Path,
         start_frame: int = 0,
         end_frame: int | None = None,
+        focal: FocalSpec | None = None,
     ) -> None:
         self.video_path = Path(video_path).resolve()
+        # Focal-length evidence (measured px / EXIF still / focal_mm + sensor
+        # size), from config or CLI. Empty spec -> the 0.8*width guess, logged
+        # as a warning by resolve_focal. Video files carry no per-frame EXIF.
+        self._focal_spec = focal or FocalSpec()
         if not self.video_path.exists():
             raise DataError(f"Video file does not exist: {self.video_path}")
 
@@ -77,17 +83,27 @@ class VideoFileSource(ImageSource):
         )
 
     def calibration(self) -> CameraCalibration:
-        """Return generic or estimated camera calibration for video stream."""
-        # Generic pinhole camera model based on frame dimensions (FOV ~60 deg)
-        fx = fy = float(self._width) * 0.8
-        cx = float(self._width) / 2.0
-        cy = float(self._height) / 2.0
+        """Return camera calibration for the video stream.
+
+        The focal comes from the best available evidence (measured px >
+        EXIF still > focal_mm + sensor size > 0.8*width guess) and its
+        provenance is recorded on the calibration, so a run built on a
+        guessed focal can never be mistaken for a measured one.
+        """
+        derived = resolve_focal(self._focal_spec, self._width, self._height)
+        logger.info(
+            "Video focal %.1f px (provenance: %s, HFoV %.1f deg)",
+            derived.focal_px,
+            derived.provenance,
+            derived.hfov_deg,
+        )
         return CameraCalibration(
             model="PINHOLE",
             width=self._width,
             height=self._height,
-            params=[fx, fy, cx, cy],
-            source=f"video_estimate_{self.video_path.name}",
+            params=[derived.fx, derived.fy, derived.cx, derived.cy],
+            source=f"video_{derived.provenance}_{self.video_path.name}",
+            provenance=derived.provenance,
         )
 
     def iter_frames(self) -> Iterator[FrameRecord]:

@@ -1,5 +1,11 @@
 """Regenerate dense cloud + TSDF mesh + full 3D map for an existing run.
 
+WARNING: this script uses the QUARANTINED legacy modules
+(uav3d.modeling.legacy) — TSDF dense fusion and symmetry-completion 3D maps.
+Both invent geometry that was never observed. This is a developer-only manual
+script; it is not part of the pipeline and its outputs must never be demoed
+or shipped as measured reconstructions.
+
 Usage:
     uv run python scripts/regen_dense_map.py <run_dir>
 """
@@ -11,8 +17,8 @@ import sys
 import time
 from pathlib import Path
 
-from uav3d.modeling.completion import build_full_3d_map
-from uav3d.modeling.dense import generate_dense_and_mesh_tsdf
+from uav3d.modeling.legacy.completion import build_full_3d_map
+from uav3d.modeling.legacy.dense_tsdf import generate_dense_and_mesh_tsdf
 
 
 def main() -> int:

@@ -72,11 +72,19 @@ class TestFocalDrift:
 
 
 class TestSfmConfigFocalGate:
-    def test_defaults_are_warn_at_10_percent(self) -> None:
+    def test_defaults_are_warn_at_5_percent(self) -> None:
+        # Phase 1 tightened the gate from 10% to 5% (Pix4D's green threshold).
         cfg = SfmConfig()
-        assert cfg.focal_drift_max_rel == 0.10
+        assert cfg.focal_drift_max_rel == 0.05
         assert cfg.focal_drift_action == "warn"
         assert cfg.matcher_type == "sequential"
+
+    def test_check_focal_drift_default_is_5_percent(self) -> None:
+        # The module-level default must match the config default, so callers
+        # that omit max_rel_drift (e.g. run_video_pipeline.summarise) get 5%.
+        assert check_focal_drift(1000.0, 1040.0).exceeded is False  # 4% passes
+        assert check_focal_drift(1000.0, 1060.0).exceeded is True  # 6% flagged
+        assert check_focal_drift(1000.0, 1060.0).max_rel_drift == 0.05
 
     def test_fail_action_is_accepted(self) -> None:
         cfg = SfmConfig(focal_drift_action="fail")

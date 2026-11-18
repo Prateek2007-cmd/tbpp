@@ -1,15 +1,27 @@
-"""Unit tests for LoD-2 planar reconstruction and projective texturing."""
+"""Unit tests for LoD-2 planar reconstruction and projective texturing.
+
+QUARANTINED (Phase 4, 2026-11-17): the LoD-2 module under test
+(``uav3d.modeling.legacy.lod2``) invents geometry — prismatic solids with
+tiered roofs / minaret templates fitted to any elevated cluster — and is NOT
+used by the pipeline. These tests are kept so the quarantined code stays
+characterised, and skip cleanly where ``open3d`` is unavailable.
+``uav3d.modeling.texturing`` itself only projects real keyframe pixels onto
+given geometry; it is not quarantined, but it is NOT wired into the CLI
+either (its inputs are the quarantined LoD-2 outputs — see the Phase 4
+report; the dense mesh already carries per-vertex colour).
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
-import open3d as o3d
 import pytest
 from PIL import Image
 
-from uav3d.modeling.lod2 import (
+o3d = pytest.importorskip("open3d", reason="open3d not installed; quarantined LoD-2 tests need it")
+
+from uav3d.modeling.legacy.lod2 import (
     build_clipped_terrain_mesh,
     decompose_and_align_scene,
     reconstruct_lod2_structures,

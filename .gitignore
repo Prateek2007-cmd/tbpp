@@ -27,3 +27,7 @@ data/
 !data/.gitkeep
 !data/raw/.gitkeep
 !data/interim/.gitkeep
+
+# Demo site model files (binary, >push-files limits) — uploaded to GitHub via the web UI, not git
+site/city/dense/*.glb
+site/vineyard/dense/*.glb

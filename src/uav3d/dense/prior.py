@@ -13,11 +13,29 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 from scipy.stats import spearmanr
 
 from uav3d.dense.cameras import CameraView
 from uav3d.dense.sweep import DepthEstimate
+
+
+def _load_onnxruntime():
+    """Import onnxruntime lazily — only the monocular prior needs it.
+
+    The prior is opt-in (``--prior``, default off) and its checkpoint is not
+    shipped with the repo, so importing this module must not require
+    onnxruntime: ``uav3d dense`` and the affine-fit helpers work without it.
+    Only constructing :class:`MonocularPriorModel` raises, with an actionable
+    message, when the package is missing.
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise ImportError(
+            "The monocular depth prior requires onnxruntime, which is not "
+            "installed. Install it with: pip install \"uav3d[prior]\""
+        ) from exc
+    return ort
 
 
 def fit_inverse_depth(
@@ -108,6 +126,7 @@ class MonocularPriorModel:
         self.model_path = Path(model_path)
         if not self.model_path.exists():
             raise FileNotFoundError(f"Depth prior model not found: {self.model_path}")
+        ort = _load_onnxruntime()
         options = ort.SessionOptions()
         options.intra_op_num_threads = max(1, int(threads))
         options.inter_op_num_threads = 1

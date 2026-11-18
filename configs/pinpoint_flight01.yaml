@@ -1,0 +1,99 @@
+# Configuration for PinPoint flight01 — the first REAL drone video + GPS run.
+#
+# Dataset: PinPoint flight01, Zenodo record 23214783 (DOI 10.5281/zenodo.23214783),
+# CC BY 4.0. Real Sentinel fixed-wing VTOL flight, 2026-07-05, flat farmland near
+# 41.774 N, 0.744 W. Video 1280x720 @ 60 fps, 914.5 s; ArduPilot DataFlash log with
+# 4,688 GPS fixes at 5 Hz (metre-level, NO RTK); 100 GCPs.
+#
+# !!! THE DATASET LIVES OUTSIDE THIS REPO !!!
+# Download flight01.zip from https://zenodo.org/records/23214783 and extract it to
+# ~/workspace/tbpp-data/pinpoint/flight01/ (expected md5 of the zip:
+# 258acb16f17e480f57c0b70ff817a8c0). The paths below are absolute and point there;
+# the repo itself ships no video and no .BIN log. See README.md ("Real drone data")
+# and ~/workspace/tbpp-data/DATASET_REPORT.md for the full dataset report.
+#
+# Key numbers (all verified against the dataset, never guessed):
+#   * focal_px 876.7 = focal_norm 0.6849 (OpenSfM self-calibration of this exact
+#     camera, campaign.json) x 1280 px width. The old 0.8*width guess gives
+#     1024 px — 17% too long. PINHOLE, cx=640, cy=360 (principal point assumed
+#     centred; not measured). No distortion coefficients published.
+#   * refine_intrinsics FALSE: a straight strip is a critical motion sequence —
+#     free focal refinement is unstable and absorbs a depth stretch (see
+#     docs/HANDOFF_NEXT_SESSION.md §12). The known focal is the accuracy fix.
+#   * Telemetry: pass the .BIN log with --telemetry on the command line
+#     (scripts/run_video_pipeline.py --telemetry <path> or uav3d sync
+#     --telemetry <path>). The parser normalises boot-relative TimeUS into the
+#     video-PTS basis with the flight's own sync offset, read from
+#     campaign.json next to the .BIN (config.sync.offset_s = 1.2 s for THIS
+#     flight). The offset is PER-FLIGHT — flight02 is 49.4 s — so it is
+#     deliberately NOT set in this config: an explicit value here would
+#     override the campaign.json lookup. Override only with
+#     --sync-offset-s / sync.dataflash_sync_offset_us when you have measured
+#     a better offset yourself. Do NOT rely on Mode B's offset estimator for
+#     this — it only searches within max_delta_us.
+#   * dense.scale_source gnss: metric scale comes from the GPS trajectory via a
+#     robust Umeyama fit (median + k*MAD outlier rejection). Requires
+#     telemetry.json in the run directory (produced by the sync stage).
+#
+# Suggested first run (60-120 s window, airborne and stable):
+#   python scripts/run_video_pipeline.py --video /home/hatch/workspace/tbpp-data/pinpoint/flight01/test_flight01_visible.mkv \
+#       --config configs/pinpoint_flight01.yaml --start-frame 7200 --end-frame 14400 \
+#       --telemetry /home/hatch/workspace/tbpp-data/pinpoint/flight01/test_flight01.BIN --stage sfm
+# The full 15 min / ~55k-frame pass is a later scaling step, not the first run.
+
+data_dir: "./data"
+dataset_label: "PinPoint flight01 (Zenodo 23214783, CC BY 4.0) — real VTOL video + ArduPilot GPS"
+
+source:
+  type: "video"
+  video_path: "/home/hatch/workspace/tbpp-data/pinpoint/flight01/test_flight01_visible.mkv"
+  count: 300
+  stride: 1
+
+keyframes:
+  strategy: "laplacian_variance"
+  stride: 1
+  max_frames: 250
+  min_blur: 40.0
+  max_clipping: 0.65
+  max_gap: 20
+  orb_features: 2000
+
+sfm:
+  camera_model: "SIMPLE_PINHOLE"
+  single_camera: true
+  seq_overlap: 15
+  max_image_size: 1600
+  refine_intrinsics: false
+  # Measured focal for THIS camera (OpenSfM self-calibration, campaign.json):
+  # focal_norm 0.6849 * 1280 px = 876.7 px. Locked, never refined (see header).
+  focal_px: 876.7
+  feature_type: "SIFT"
+  matcher_type: "sequential"
+  min_num_matches: 20
+  init_min_inliers: 20
+  init_min_tri_angle: 3.0
+  abs_pose_min_inliers: 12
+
+sync:
+  # 150 ms, NOT the 50 ms of video_flyover.yaml: the .BIN GPS fixes arrive
+  # at 5 Hz (200 ms apart), so a keyframe can sit up to 100 ms from its
+  # nearest fix. A 50 ms window would match only ~half the frames and trip
+  # the 80% match-rate gate. 150 ms = half the fix cadence + 50 ms of clock
+  # skew margin. Residual timing error (<=100 ms x ~18 m/s = <=1.8 m
+  # along-track) is inside the metre-level GPS noise and is reported in the
+  # sync summary as residual_median_ms / residual_p95_ms.
+  max_delta_us: 150000
+  strategy: "nearest"
+  # No dataflash_sync_offset_us here — deliberately. The parser reads the
+  # per-flight offset from campaign.json next to the .BIN (1.2 s for
+  # flight01, 49.4 s for flight02) and fails loudly if it cannot find one.
+  # Set dataflash_sync_offset_us only to override with a measured value.
+
+validation:
+  alignment: "sim3"
+  ate_threshold_meters: 5.0
+
+dense:
+  scale_source: "gnss"
+  gnss_reject_k_mad: 5.0

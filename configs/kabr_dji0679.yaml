@@ -1,0 +1,82 @@
+# Configuration for KABR DJI_0679 (Phase 5 — 1080p + DJI SRT end-to-end).
+#
+# Dataset: KABR (Kenya) DJI Air 2S flight, 2023-01-18. Video 1920x1080 @
+# 29.97 fps, 143.6 s (4,305 frames) + per-frame DJI .SRT sidecar (4,304 GPS
+# records, ~30 Hz, rel_alt ~44-63 m). Path:
+# ~/workspace/tbpp-data/more-videos/kabr-dji0679/ — see
+# ~/workspace/tbpp-data/VIDEO_SOURCES.md.
+#
+# Focal (Phase 1 spec path): DJI Air 2S, 1-inch sensor (13.2 mm wide),
+# 8.4 mm lens -> fx = 8.4/13.2 x 1920 = 1221.8 px. Do NOT trust the SRT
+# focal_len field (240 = 24.0 mm, a 35mm-equivalent-style value that varies
+# between flights). Principal point assumed centred (not measured).
+#
+# SRT format: bracketed ``longtitude`` variant (DJI's typo) — handled by
+# uav3d/telemetry/srt_parser.py. SRT timestamps are already in the video-PTS
+# basis (record 0 at t=0), so sync needs no offset. max_delta_us 50 ms:
+# SRT fixes arrive per frame (~33 ms apart).
+#
+# Breadth run: max_frames 120 (not 250) to bound SfM wall time; 60 s window
+# frames 0-1800 (drone is airborne from frame 0, rel_alt 44 m).
+#
+# Run:
+#   python scripts/run_video_pipeline.py --video \
+#     /home/hatch/workspace/tbpp-data/more-videos/kabr-dji0679/DJI_0679.MP4 \
+#     --config configs/kabr_dji0679.yaml --start-frame 0 --end-frame 1800 \
+#     --telemetry /home/hatch/workspace/tbpp-data/more-videos/kabr-dji0679/DJI_0679.SRT \
+#     --stage sfm
+# Dense only if the GPS-residual median is < 10 m (see Phase 5 task).
+
+data_dir: "./data"
+dataset_label: "KABR DJI_0679 (DJI Air 2S, 1080p + SRT) — Phase 5 breadth run"
+
+source:
+  type: "video"
+  video_path: "/home/hatch/workspace/tbpp-data/more-videos/kabr-dji0679/DJI_0679.MP4"
+  count: 300
+  stride: 1
+
+keyframes:
+  strategy: "laplacian_variance"
+  stride: 1
+  max_frames: 120
+  min_blur: 40.0
+  max_clipping: 0.65
+  max_gap: 20
+  orb_features: 2000
+
+sfm:
+  camera_model: "SIMPLE_PINHOLE"
+  single_camera: true
+  seq_overlap: 15
+  max_image_size: 1600
+  refine_intrinsics: false
+  # DJI Air 2S spec: 8.4 mm lens, 1-inch sensor 13.2 mm wide ->
+  # fx = 8.4/13.2 * 1920 = 1221.8 px. Provenance: spec (not measured).
+  focal_mm: 8.4
+  sensor_width_mm: 13.2
+  feature_type: "SIFT"
+  matcher_type: "sequential"
+  min_num_matches: 20
+  init_min_inliers: 20
+  init_min_tri_angle: 3.0
+  abs_pose_min_inliers: 12
+  # Global-BA cadence 2.0 (not the 1.1 default): 1080p vegetation
+  # triangulates >10% new points per frame, so the default runs a 3-4 min
+  # global BA after EVERY frame (measured 2026-11-17: 51/120 in 26 min
+  # before the run was stopped). 2.0 => BA when the model doubles + the
+  # final global BA; local BA still runs per frame. See SfmConfig.
+  ba_global_frames_ratio: 2.0
+  ba_global_points_ratio: 2.0
+
+sync:
+  max_delta_us: 50000
+  strategy: "nearest"
+
+validation:
+  alignment: "sim3"
+  ate_threshold_meters: 5.0
+
+dense:
+  scale_source: "gnss"
+  gnss_reject_k_mad: 5.0

@@ -26,3 +26,12 @@ class CameraCalibration(BaseModel):
     height: int = Field(..., description="Sensor height in pixels", gt=0)
     params: list[float] = Field(..., description="Intrinsic camera parameters list")
     source: str = Field(..., description="Calibration source (e.g. calibration_data.npz)")
+    provenance: str = Field(
+        default="unknown",
+        description=(
+            "How the focal length was obtained: 'measured' (pre-flight calibration "
+            "capture), 'exif' (still-image EXIF + sensor size), 'sensor_spec' "
+            "(focal_mm + sensor size from the spec sheet), 'guessed' (0.8 * image "
+            "width fallback), or 'unknown' (legacy / dataset default)."
+        ),
+    )

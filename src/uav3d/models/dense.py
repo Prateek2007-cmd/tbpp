@@ -94,6 +94,20 @@ class DenseScaleSummary(BaseModel):
     value: float = Field(..., gt=0.0, description="Metres per SfM unit")
     source: str = Field(..., description="none, fixed, or gnss")
     status: str = Field(..., description="unverified_monocular_scale, fixed_by_user, gnss_aligned")
+    # GNSS-fit diagnostics (present only when source == "gnss"). The fit
+    # rejects outlier fixes (median + k*MAD) and reports how many — it
+    # never silently fits through bad fixes.
+    gnss_frames: int | None = Field(default=None, description="GPS fixes kept as inliers in the final fit")
+    gnss_rejected: int | None = Field(default=None, description="GPS fixes rejected as outliers")
+    gnss_alignment_rms_m: float | None = Field(
+        default=None, description="Post-fit RMS residual (m) of the inlier GPS fixes after the full Sim(3) alignment"
+    )
+    # Georeferencing anchor (present only when source == "gnss"): the ENU
+    # origin is the first GPS fix; the full Sim(3) lives in georef.json.
+    origin_lat: float | None = Field(default=None, description="ENU origin latitude (first GPS fix)")
+    origin_lon: float | None = Field(default=None, description="ENU origin longitude (first GPS fix)")
+    origin_alt_m: float | None = Field(default=None, description="ENU origin altitude, metres MSL (first GPS fix)")
+    crs_epsg: int | None = Field(default=None, description="EPSG code of the UTM zone containing the origin")
 
 
 class DenseReport(BaseModel):

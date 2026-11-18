@@ -1,0 +1,63 @@
+# DIAGNOSTIC ONLY (not for the model): free-focal SfM on a 40-frame subset
+# of GrapeSLAM DJI_0016, to confirm the locked spec focal (2560 px).
+# If the solved focal lands within +/-5% of 2560, the spec focal is
+# confirmed and the main run proceeds with refine_intrinsics: false.
+# If it lands far off, STOP — possible video crop factor to investigate.
+# Identical to configs/grapeslam_dji0016.yaml except max_frames 40 and
+# refine_intrinsics: true. No telemetry is synced for this run (focal
+# diagnostic only); the focal-drift gate warns, it does not fail.
+#
+# Run:
+#   python scripts/run_video_pipeline.py --video \
+#     /home/hatch/workspace/tbpp-data/more-videos/grapeslam-dji0016/DJI_0016.MOV \
+#     --config configs/grapeslam_dji0016_diag.yaml --stage sfm
+# (keyframes first via --stage keyframes; no --telemetry flag.)
+
+data_dir: "./data"
+dataset_label: "GrapeSLAM DJI_0016 DIAGNOSTIC free-focal 40-frame subset"
+
+source:
+  type: "video"
+  video_path: "/home/hatch/workspace/tbpp-data/more-videos/grapeslam-dji0016/DJI_0016.MOV"
+  count: 300
+  stride: 1
+
+keyframes:
+  strategy: "laplacian_variance"
+  stride: 1
+  max_frames: 40
+  min_blur: 40.0
+  max_clipping: 0.65
+  max_gap: 20
+  orb_features: 2000
+
+sfm:
+  camera_model: "SIMPLE_PINHOLE"
+  single_camera: true
+  seq_overlap: 15
+  max_image_size: 1600
+  refine_intrinsics: true
+  # Same spec focal as the main config (2560.0 px) — the PRIOR the
+  # free-focal solve starts from and is compared against.
+  focal_mm: 8.8
+  sensor_width_mm: 13.2
+  feature_type: "SIFT"
+  matcher_type: "sequential"
+  min_num_matches: 20
+  init_min_inliers: 20
+  init_min_tri_angle: 3.0
+  abs_pose_min_inliers: 12
+  ba_global_frames_ratio: 2.0
+  ba_global_points_ratio: 2.0
+
+sync:
+  max_delta_us: 50000
+  strategy: "nearest"
+
+validation:
+  alignment: "sim3"
+  ate_threshold_meters: 5.0
+
+dense:
+  scale_source: "gnss"
+  gnss_reject_k_mad: 5.0

@@ -1,5 +1,15 @@
 #!/usr/bin/env python
-"""Bake best-view keyframe colours onto a dense city mesh and export a GLB."""
+"""Bake best-view keyframe colours onto a dense city mesh and export a GLB.
+
+Units and georeferencing (Phase 2): the dense stage already multiplies
+exported vertices by the resolved metric scale, so a mesh from a
+``gnss``/``fixed`` dense run is in metres and one from a ``none`` run is in
+SfM units. This script reads that provenance from ``dense_report.json``
+(never a hardcoded number), records it in the report JSON and the GLB's
+asset extras, and — when the dense run wrote ``georef.json`` — places the
+vertices in ENU metres about the documented GPS origin instead of the
+gravity-aligned centred frame.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +33,11 @@ from uav3d.modeling.texture_bake import (  # noqa: E402
     gravity_transform,
     sample_vertex_colors,
     vertex_normals,
+)
+from uav3d.telemetry.georef import (  # noqa: E402
+    apply_georef_to_vertices,
+    load_georef,
+    resolve_scale_from_dense_report,
 )
 
 
@@ -198,24 +213,67 @@ def main() -> None:
 
     colors = sample_vertex_colors(verts, best_view, views, load_rgb, fallback)
 
-    if cloud_path.exists():
-        cloud = o3d.io.read_point_cloud(str(cloud_path))
-        gravity_points = np.asarray(cloud.points)
+    # --- Metric scale + georeferencing (Phase 2) ---------------------------
+    # The dense stage already scaled the mesh vertices to metres when the
+    # scale source was gnss/fixed (dense/pipeline.py §6) — the scale is
+    # NOT applied again here (that would double-scale). What this script
+    # does: read the provenance from dense_report.json, place georeferenced
+    # runs in their ENU frame, and record everything in the report + GLB.
+    scale_info = resolve_scale_from_dense_report(dense_dir)
+    georef = load_georef(dense_dir)
+    print(f"scale: {scale_info.value_m_per_unit:.4f} m/unit "
+          f"({scale_info.source}/{scale_info.status}), units={scale_info.units}")
+
+    georef_meta = None
+    if georef is not None and scale_info.is_metric:
+        # Georeferenced run: vertices are already metres in SfM
+        # orientation; the georef Sim(3) rotation + translation places them
+        # in ENU metres about the documented origin. No gravity PCA and no
+        # centring here — both would destroy the georeferencing.
+        verts_up = apply_georef_to_vertices(verts, georef)
+        frame = "ENU"
+        georef_meta = {
+            "crs": georef.get("crs"),
+            "crs_name": georef.get("crs_name"),
+            "utm_zone": georef.get("utm_zone"),
+            "origin": georef.get("origin"),
+            "alignment_rms_m": georef.get("alignment_rms_m"),
+            "gnss_frames": georef.get("gnss_frames"),
+            "gnss_rejected": georef.get("gnss_rejected"),
+        }
+        print(f"georeferenced: {georef_meta['crs_name']}, "
+              f"origin {georef_meta['origin']}")
     else:
-        gravity_points = verts
-    if len(gravity_points) == 0:
-        gravity_points = verts
-    rotation, offset = gravity_transform(gravity_points)
-    verts_up = verts @ rotation.T
-    verts_up[:, 2] += offset
-    lo = np.percentile(verts_up, 2.0, axis=0)
-    hi = np.percentile(verts_up, 98.0, axis=0)
-    verts_up[:, 0] -= 0.5 * (lo[0] + hi[0])
-    verts_up[:, 1] -= 0.5 * (lo[1] + hi[1])
-    verts_up[:, 2] -= lo[2]
+        if georef is not None and not scale_info.is_metric:
+            print("WARNING: georef.json exists but the dense scale is not "
+                  "metric; ignoring georeferencing and using the local frame")
+        if cloud_path.exists():
+            cloud = o3d.io.read_point_cloud(str(cloud_path))
+            gravity_points = np.asarray(cloud.points)
+        else:
+            gravity_points = verts
+        if len(gravity_points) == 0:
+            gravity_points = verts
+        rotation, offset = gravity_transform(gravity_points)
+        verts_up = verts @ rotation.T
+        verts_up[:, 2] += offset
+        lo = np.percentile(verts_up, 2.0, axis=0)
+        hi = np.percentile(verts_up, 98.0, axis=0)
+        verts_up[:, 0] -= 0.5 * (lo[0] + hi[0])
+        verts_up[:, 1] -= 0.5 * (lo[1] + hi[1])
+        verts_up[:, 2] -= lo[2]
+        frame = "local (gravity-aligned, centred)"
 
     out = Path(args.out)
-    write_glb(out, verts_up, faces, colors=colors, name="city_textured")
+    glb_extras = {
+        "uav3d": {
+            "frame": frame,
+            **scale_info.to_dict(),  # includes units + scale provenance
+            "georef": georef_meta,
+        }
+    }
+    write_glb(out, verts_up, faces, colors=colors, name="city_textured",
+              extras=glb_extras)
     print(f"wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")
 
     vertex_cloud = o3d.geometry.PointCloud()
@@ -235,6 +293,12 @@ def main() -> None:
         "unique_views_used": int(len(np.unique(best_view[best_view >= 0]))),
         "bbox_min": np.round(verts_up.min(0), 3).tolist(),
         "bbox_max": np.round(verts_up.max(0), 3).tolist(),
+        # Metric scale + georeferencing provenance (Phase 2). bbox is in
+        # the stated units; the scale value comes from dense_report.json,
+        # never a hardcoded number.
+        "frame": frame,
+        **scale_info.to_dict(),  # units + scale_m_per_unit/source/status (+gnss)
+        "georef": georef_meta,
         "output": str(out),
     }
     report_path = out.with_name(out.stem + "_report.json")

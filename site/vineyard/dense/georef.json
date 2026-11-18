@@ -1,0 +1,55 @@
+{
+  "frame": "ENU",
+  "origin": {
+    "lat": 41.93783437,
+    "lon": -8.792473366,
+    "alt_m": 52.29229517136001,
+    "kind": "first_gps_fix",
+    "frame_id": "video_000040",
+    "telemetry_time_ms": 84600
+  },
+  "crs": "EPSG:32629",
+  "crs_name": "UTM zone 29N (EPSG:32629)",
+  "utm_zone": "29N",
+  "source": "pose_prior_ba",
+  "sim3": {
+    "scale_m_per_unit": 1.0,
+    "rotation": [
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "translation_m": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "scale_provenance": {
+    "method": "GPS pose-prior bundle adjustment (pycolmap create_pose_prior_bundle_adjuster, WGS84 priors)",
+    "report": "pose_prior_ba.json",
+    "n_priors": 105,
+    "n_holdout": 11,
+    "prior_sigma_m": 3.0,
+    "sim3_scale_before_prior_ba": 4.8347,
+    "sim3_scale_after_prior_ba": 1.0001,
+    "dense_scale": {
+      "value": 1.0,
+      "source": "fixed",
+      "status": "fixed_by_user"
+    },
+    "note": "The sparse model is already metric ENU about the first fix after the pose-prior BA, and the dense stage applied the fixed scale 1.0, so the Sim(3) mapping SfM coordinates onto ENU is the identity. No GNSS Umeyama fit was run on this run; there are no gnss alignment fields because none exists."
+  }
+}

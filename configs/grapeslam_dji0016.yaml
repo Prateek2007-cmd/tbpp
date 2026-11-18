@@ -1,0 +1,125 @@
+# Configuration for GrapeSLAM DJI_0016 (Stage 1 of the showpiece build,
+# SIH 2026 PS 26158). Frozen plan: ~/workspace/tbpp-audit/GRAPESLAM_PLAN.md.
+# Branch: luffy/grapeslam-showpiece. NEVER push.
+#
+# Dataset: GrapeSLAM vineyard flight, 2023-09-18. Video 3840x2160 @ 29.97 fps,
+# 54.054 s (1620 frames), H.264 + AirData .xlsx export (543 GPS fixes @ 10 Hz).
+# Path: ~/workspace/tbpp-data/more-videos/grapeslam-dji0016/ — see
+# ~/workspace/tbpp-audit/grapeslam/stage0-telemetry.md.
+#
+# Focal (LOCKED, spec path): Phantom 4 RTK, 8.8 mm lens, 1-inch sensor
+# 13.2 mm wide -> fx = 8.8/13.2 x 3840 = 2560.0 px, provenance sensor_spec.
+# Set via focal_mm + sensor_width_mm (NOT focal_px: in this codebase
+# focal_px records provenance "measured", which would misstate the evidence;
+# the spec path yields exactly 2560.0 px with provenance sensor_spec, same
+# as the KABR configs). Principal point assumed centred (not measured).
+# refine_intrinsics: false — the focal MUST stay locked (Stage 0 spike:
+# freeing focal collapsed it 2443.6 -> 1564.9 px and doubled GPS RMSE).
+#
+# Flight geometry: gimbal pitch 0.0 deg on every xlsx row — forward-looking,
+# low (~1.5-3 m above takeoff) pass down a vineyard-row aisle, NOT nadir.
+# Sky occupies the top ~30% of the frame; keyframe quality settings are the
+# same lenient KABR ones (min_blur 40, max_clipping 0.65) so sky-dominated
+# frames are not all rejected — sky-dominated keyframes are noted in the
+# Stage 1 record, not filtered by new logic.
+#
+# Sync: xlsx parser anchors the first fix (84400 ms) to video t=0
+# (sync_offset_us 0, coarse; Stage 0 found no sharp fine-scan minimum).
+# max_delta_us 50 ms: xlsx fixes are 100 ms apart, so the worst-case
+# keyframe-to-fix distance is exactly 50 ms (inclusive match; Stage 0
+# end-to-end test got match rate 1.0 at this setting). The pose-based
+# sync re-scan is a mandatory Stage 1 step before pose-prior BA.
+#
+# Run (from ~/workspace/tbpp, venv python):
+#   python scripts/run_video_pipeline.py --video \
+#     /home/hatch/workspace/tbpp-data/more-videos/grapeslam-dji0016/DJI_0016.MOV \
+#     --config configs/grapeslam_dji0016.yaml \
+#     --telemetry /home/hatch/workspace/tbpp-data/more-videos/grapeslam-dji0016/DJI0016.xlsx \
+#     --stage sfm
+# (keyframes first via --stage keyframes; --stage sfm runs SfM + sync.
+# Pose-prior BA follows as a separate CLI stage: uav3d pose-prior-ba.)
+# KABR DJI_0679's 120 frames took ~71 min for SfM+sync; budget similar here.
+
+data_dir: "./data"
+dataset_label: "GrapeSLAM DJI_0016 (Phantom 4 RTK, 4K + xlsx) — showpiece Stage 1"
+
+source:
+  type: "video"
+  video_path: "/home/hatch/workspace/tbpp-data/more-videos/grapeslam-dji0016/DJI_0016.MOV"
+  count: 300
+  stride: 1
+
+keyframes:
+  strategy: "laplacian_variance"
+  stride: 1
+  max_frames: 120
+  min_blur: 40.0
+  max_clipping: 0.65
+  max_gap: 20
+  orb_features: 2000
+
+sfm:
+  camera_model: "SIMPLE_PINHOLE"
+  single_camera: true
+  seq_overlap: 15
+  max_image_size: 1600
+  refine_intrinsics: false
+  # Phantom 4 RTK spec: 8.8 mm lens, 1-inch sensor 13.2 mm wide ->
+  # fx = 8.8/13.2 * 3840 = 2560.0 px. Provenance: sensor_spec (not measured).
+  focal_mm: 8.8
+  sensor_width_mm: 13.2
+  feature_type: "SIFT"
+  matcher_type: "sequential"
+  min_num_matches: 20
+  init_min_inliers: 20
+  init_min_tri_angle: 3.0
+  abs_pose_min_inliers: 12
+  # Global-BA cadence 2.0 (not the 1.1 default): vegetation triangulates
+  # >10% new points per frame, so the default runs a 3-4 min global BA
+  # after EVERY frame (measured on DJI_0679: 51/120 in 26 min before the
+  # run was stopped). 2.0 => BA when the model doubles + the final global
+  # BA; local BA still runs per frame. See SfmConfig.
+  ba_global_frames_ratio: 2.0
+  ba_global_points_ratio: 2.0
+
+sync:
+  max_delta_us: 50000
+  strategy: "nearest"
+  # Pose-based sync re-scan (Stage 1, mandatory step): sharp interior
+  # minimum at -1130 ms (GPS residual median 0.049 m vs 0.324 m at 0;
+  # see sync_scan.json / sync_scan_wide.json in the run dir). The video
+  # started ~1.1 s before the AirData log's first fix (drone hovering,
+  # so the coarse checks still passed). Applied 2026-11-17.
+  xlsx_sync_offset_us: -1130000
+
+validation:
+  alignment: "sim3"
+  ate_threshold_meters: 5.0
+
+dense:
+  # Stage 2: the sparse model in colmap/sparse/0 is ALREADY metric ENU
+  # (pose-prior BA, Stage 1: scale 1.0001, origin = first GPS fix), so the
+  # dense cloud must be read at scale 1.0 — do NOT re-derive scale from a
+  # scoring-time Sim(3) ("gnss" would re-fit it and write a georef.json
+  # from that fit). Stage 5 writes georef.json from the pipeline frame.
+  scale_source: "fixed"
+  scale_factor: 1.0
+  gnss_reject_k_mad: 5.0
+  # Stage 2-continued (2026-11-17): diagnosed matcher fix, config-only.
+  # The 160-plane cap pushed the near plane to ~6 m on mid-flight views
+  # (clamp_near_for_plane_budget), discarding the closest ground (2-6 m)
+  # — the missing ground sheet. Raising max_planes to 320 drops the
+  # clamped near plane to ~2.5 m at the median baseline (0.716 m,
+  # f=1280 px: max span 320*0.7*1.5=336 px -> near 1/(1/25+336/916)=2.46 m).
+  # depth_range "1.5:25": near 1.5 m matches the pipeline's own near floor
+  # (0.28 x median depth 5.50 m = 1.54 m; sparse near p50 1.90 m, min 1.21 m).
+  # Far 25 m from the sparse depth distribution (per-view far p50 37.6 m,
+  # p90 46.8 m — those are treeline/hillside, not the vineyard scene) and
+  # stereo precision: sigma_z 0.205 m at 25 m vs 0.82 m at 50 m
+  # (f=1280, b=0.716, sigma_d=0.3 px); the 25-50 m band yields ~5% valid
+  # pixels while consuming inverse-depth span. The max_relative_sigma gate
+  # (0.02) does not bind until ~61 m, so the far clamp is the control.
+  # Consistency filter NOT loosened. Measured in
+  # ~/workspace/tbpp-audit/grapeslam/stage2-baseline-measurable.json.
+  max_planes: 320
+  depth_range: "1.5:25"

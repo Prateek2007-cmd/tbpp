@@ -1,0 +1,85 @@
+# Configuration for UAVLight scene 1121211223101030, slot 2025-07-09-12-41-31
+# (Phase 5 accuracy validation — the citable real-data number).
+#
+# Dataset: Hugging Face dukang92/UAVLight (CVPR 2026, HKUST-GZ), CC BY-NC 4.0.
+# Scene 1121211223101030, ONE slot = one single-pass capture: 95 frames,
+# 2025-07-09-12-41-31 (the largest slot). Ground truth: RTK-anchored
+# downsampled_points.ply (1,445,848 pts) + RTK COLMAP poses in sparse/0.
+#
+# !!! THE DATASET LIVES OUTSIDE THIS REPO !!!
+# ~/workspace/tbpp-data/uavlight/1121211223101030/ — see
+# ~/workspace/tbpp-data/DATASET_REPORT.md §2.
+#
+# Video path: UAVLight ships frames only, so the slot was muxed to MP4:
+#   ffmpeg -framerate 30 -pattern_type glob -i 'images/2025-07-09-12-41-31/*.JPG'
+#     -vf "pad=1258:942:0:0:black" -c:v libx264 -crf 12 -pix_fmt yuv420p
+#     slot_2025-07-09.mp4
+# The 1257x941 frames are odd-width, which libx264/yuv420p rejects, so they
+# are padded 1 px right + 1 px bottom. Padding is top-left aligned, so every
+# content pixel keeps its original coordinates and the cameras.txt intrinsics
+# apply VERBATIM to the padded 1258x942 frame (fx/cx/cy unchanged). Frame
+# order verified: MP4 frame i == epoch-sorted JPG i (mean|diff| ~2 from
+# crf12 compression); the ordered list is slot_2025-07-09_frame_order.json.
+#
+# Intrinsics (sparse/0/cameras.txt, camera 1 = the 1257x941 slot camera):
+#   PINHOLE 1257 941, fx 1086.055, fy 1086.190, cx 357.799, cy 470.152.
+# !!! PRINCIPAL POINT IS NOT AT IMAGE CENTRE (cx 357.8 vs 628.5 centre):
+# the frames are asymmetrically cropped in x. cx/cy are set explicitly below
+# (Phase 5 addition to SfmConfig); assuming the centre would warp the model.
+# fx/fy differ by 0.01% — SIMPLE_PINHOLE with fx=1086.06 is exact to 0.1 px.
+# refine_intrinsics FALSE (straight strip = critical motion sequence; see
+# docs/HANDOFF_NEXT_SESSION.md §12).
+#
+# No raw GPS log exists for UAVLight (RTK is baked into the released COLMAP
+# poses only), so there is no sync stage and dense scale is monocular. The
+# released poses are used ONLY for evaluation alignment (Sim3) and ATE —
+# never as SfM input. See scripts/score_uavlight.py.
+#
+# Run:
+#   python scripts/run_video_pipeline.py --video \
+#     /home/hatch/workspace/tbpp-data/uavlight/1121211223101030/slot_2025-07-09.mp4 \
+#     --config configs/uavlight_slot1.yaml --stage all --max-width 960 --ref-stride 2
+
+data_dir: "./data"
+dataset_label: "UAVLight 1121211223101030 slot 2025-07-09 (CC BY-NC 4.0) — RTK-anchored GT cloud"
+
+source:
+  type: "video"
+  video_path: "/home/hatch/workspace/tbpp-data/uavlight/1121211223101030/slot_2025-07-09.mp4"
+  count: 300
+  stride: 1
+
+keyframes:
+  strategy: "laplacian_variance"
+  stride: 1
+  max_frames: 250
+  min_blur: 40.0
+  max_clipping: 0.65
+  max_gap: 20
+  orb_features: 2000
+
+sfm:
+  camera_model: "SIMPLE_PINHOLE"
+  single_camera: true
+  seq_overlap: 15
+  max_image_size: 1600
+  refine_intrinsics: false
+  # cameras.txt camera 1 verbatim (see header): fx 1086.055, cx 357.799,
+  # cy 470.152. Off-centre principal point — do NOT delete cx/cy.
+  focal_px: 1086.06
+  cx: 357.80
+  cy: 470.15
+  feature_type: "SIFT"
+  matcher_type: "sequential"
+  min_num_matches: 20
+  init_min_inliers: 20
+  init_min_tri_angle: 3.0
+  abs_pose_min_inliers: 12
+
+sync:
+  max_delta_us: 50000
+  strategy: "nearest"
+
+validation:
+  alignment: "sim3"
+  ate_threshold_meters: 5.0

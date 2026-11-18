@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UAV-3D viewer — GrapeSLAM DJI_0016 (Phantom 4 RTK, 4K + xlsx) — showpiece</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
+<style>
+  :root {
+    --paper: #f4f2ee;
+    --card: #ffffff;
+    --ink: #1c1917;
+    --muted: #78716c;
+    --line: #e7e2d9;
+    --accent: #0f766e;
+    --accent-soft: #e6f2f0;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    background: var(--paper);
+    color: var(--ink);
+    overflow: hidden;
+  }
+  #viewport { position: fixed; inset: 0; }
+  #viewport canvas { display: block; }
+  header {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 20px;
+    background: rgba(244, 242, 238, 0.88);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.2px; }
+  .badge {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid #c8e3df; border-radius: 20px; padding: 3px 9px;
+    white-space: nowrap;
+  }
+  header .hint { margin-left: auto; font-size: 12px; color: var(--muted); }
+  header .map-link { font-size: 12px; font-weight: 700; color: #fff; background: var(--accent);
+    text-decoration: none; padding: 7px 12px; border-radius: 20px; white-space: nowrap; }
+  header .map-link:hover { background: #0d5f59; }
+  #panel {
+    position: fixed; top: 64px; left: 16px; z-index: 10;
+    width: 308px; max-height: calc(100vh - 140px); overflow-y: auto;
+    background: var(--card);
+    border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: 0 8px 30px rgba(28, 25, 23, 0.08);
+    padding: 16px 18px;
+  }
+  #panel h2 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 10px; }
+  .section {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--accent);
+    margin: 16px 0 8px; padding-top: 12px; border-top: 1px solid var(--line);
+  }
+  .section:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
+  .stat {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+    font-size: 13px; padding: 4px 0;
+  }
+  .stat span { color: var(--muted); }
+  .stat b { font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace; font-weight: 600; font-size: 12px; text-align: right; }
+  .note { font-size: 12px; line-height: 1.55; color: var(--muted); margin-top: 6px; }
+  .note a { color: var(--accent); font-weight: 600; text-decoration: none; }
+  .note a:hover { text-decoration: underline; }
+  #controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10;
+    display: flex; gap: 8px; align-items: center;
+    background: var(--card); border: 1px solid var(--line); border-radius: 30px;
+    padding: 6px; box-shadow: 0 8px 30px rgba(28, 25, 23, 0.10);
+  }
+  .btn {
+    border: none; background: transparent; cursor: pointer;
+    font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--ink);
+    padding: 8px 14px; border-radius: 22px; transition: background 0.15s;
+  }
+  .btn:hover { background: var(--paper); }
+  .btn.active { background: var(--accent); color: #fff; }
+  #legend {
+    position: fixed; bottom: 20px; right: 20px; z-index: 10; display: none;
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 14px; font-size: 12px; box-shadow: 0 8px 30px rgba(28, 25, 23, 0.08);
+  }
+  #legend.show { display: block; }
+  #legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 7px; vertical-align: -1px; }
+  #legend div { margin: 3px 0; }
+  #status {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 20;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px 28px; text-align: center; max-width: 420px;
+    box-shadow: 0 12px 40px rgba(28, 25, 23, 0.12);
+  }
+  #status h3 { font-size: 15px; margin-bottom: 8px; }
+  #status p { font-size: 13px; color: var(--muted); line-height: 1.55; }
+  #status .spin {
+    width: 22px; height: 22px; margin: 0 auto 12px;
+    border: 3px solid var(--line); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #filepick { margin-top: 12px; font-size: 13px; }
+  #filepick label {
+    display: inline-block; cursor: pointer; font-weight: 600; color: #fff;
+    background: var(--accent); padding: 9px 16px; border-radius: 22px;
+  }
+  #filepick input { display: none; }
+  @media (max-width: 640px) {
+    #panel { width: calc(100vw - 32px); max-height: 42vh; }
+    header .hint { display: none; }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "../viewer_assets/three.module.js",
+  "three/addons/": "../viewer_assets/jsm/"
+} }
+</script>
+<!-- Three.js 0.160.0, vendored locally (../viewer_assets/) — no CDN. -->
+</head>
+<body>
+<header>
+  <span class="badge">SIH 2026 · NTRO PS-26158</span>
+  <h1>GrapeSLAM DJI_0016 (Phantom 4 RTK, 4K + xlsx) — showpiece</h1>
+  <span class="hint">Drag to orbit · Scroll to zoom · Right-drag to pan</span>
+  <a class="map-link" href="map/">View on map &#8599;</a>
+</header>
+
+<div id="viewport"></div>
+
+<aside id="panel">
+  <h2>Measured results</h2>
+  <div class="section">Reconstruction</div>
+  <div class="stat"><span>Frames registered</span><b>119/120 (99.2%)</b></div>
+  <div class="stat"><span>Reprojection error</span><b>0.791 px</b></div>
+  <div class="stat"><span>Sparse points</span><b>39,449</b></div>
+  <div class="stat"><span>Dense points</span><b>9,842,410</b></div>
+  <div class="stat"><span>Mesh (local file)</span><b>765,723 verts · 1,000,000 faces</b></div>
+  <div class="stat"><span>Depth valid</span><b>30.4%</b></div>
+  <div class="section">Accuracy vs ground truth</div>
+  <div class="stat"><span>Median error</span><b>not measured</b></div>
+  <div class="stat"><span>Precision @ 1.0 m</span><b>not measured</b></div>
+  <div class="stat"><span>Precision @ 0.5 m</span><b>not measured</b></div>
+  <p class="note">Accuracy is measured only when ground truth was supplied for the run. Without it, the numbers above read "not measured" — they are never estimated.</p>
+  <div class="section">GPS check — the real accuracy proof</div>
+  <div class="stat"><span>GPS residual, median (Sim(3))</span><b>0.049 m</b></div>
+  <div class="stat"><span>GPS residual, median (raw ENU)</span><b>0.050 m</b></div>
+  <div class="stat"><span>Held-out fixes (never in BA)</span><b>0.048 m · n = 11</b></div>
+  <div class="stat"><span>Focal length</span><b>2560 px · locked</b></div>
+  <div class="stat"><span>Best-view coloured verts</span><b>91.6%</b></div>
+  <p class="note">GPS is the reference for this video — there is no dense ground truth, so there is no precision-at-1 m claim. The 11 held-out fixes were never used in the bundle adjustment, so 0.048 m is an honest, non-circular check.</p>
+  
+        <div class="section">Coverage — what was actually seen</div>
+        <div class="stat"><span>Observed by ≥ 2 views</span><b>83.1%</b></div>
+        <div class="stat"><span>Observed by ≥ 3 views</span><b>53.0%</b></div>
+        <div class="stat"><span>Observed by ≥ 5 views</span><b>22.7%</b></div>
+        <p class="note">83.1% of the model surface (full mesh: 2,836,251 vertices) was directly observed by 2 or more views; the rest is unobserved — no geometry is invented there.</p>
+  <div class="section">Scale</div>
+  <p class="note">Metric scale from GPS pose-prior bundle adjustment (105 priors, σ 3.0 m; Sim(3) scale 4.83 → 1.0001). Scale 1.000 m/unit. Georeferenced UTM 29N (EPSG:32629); ENU origin = first GPS fix matched to a keyframe (video_000040).</p>
+  <div class="section">Runtime</div>
+  <div class="stat"><span>Total</span><b>1h 07m</b></div>
+  <div class="stat"><span>consistency</span><b>22.9 s</b></div><div class="stat"><span>fusion</span><b>58.1 s</b></div><div class="stat"><span>mesh</span><b>0.0 s</b></div><div class="stat"><span>mvs</span><b>1h 05m</b></div><div class="stat"><span>prepare</span><b>0.1 s</b></div><div class="stat"><span>view_selection</span><b>0.5 s</b></div>
+  <p class="note">Dense timings from the probe-config MVS sweep in this run (60 reference views); the final stride-1 fusion (119 views, 9,842,410 points) took 307.9 s.</p>
+  <div class="section">Downloads</div>
+  <p class="note"><a href="dense/mesh_textured.glb" download>mesh_textured.glb</a> — decimated textured mesh, 33.4 MB (765,723 verts · 1,000,000 faces; full 126.2 MB version on the public link)<br><a href="dense/georef.json" download>georef.json</a> — georeferencing frame (EPSG:32629)<br><a href="map/">View on map &#8599;</a> — flight path + model footprint on OpenStreetMap</p>
+  <div class="section">Honest limits</div>
+  <p class="note">The model has genuine holes — the middle of the strip is thinner than the ends, with gaps where no two views had valid depth. Nothing was invented to fill them. Dense depth reached 32.6% of measurable pixels vs a 50% target (forward-looking camera: ~25% of each frame is sky). The flight is near-collinear, so the GPS residual is a lower bound on true metric error.</p>
+</aside>
+
+<div id="controls">
+  <button class="btn" id="btn-wire">Wireframe</button>
+  <button class="btn" id="btn-orbit">Auto orbit</button>
+  <button class="btn" id="btn-coverage" style="display:none">Coverage</button>
+  <button class="btn" id="btn-reset">Reset view</button>
+</div>
+
+<div id="legend">
+  <div><b>Coverage — views that saw each surface</b></div>
+  <div><span class="sw" style="background:#0f766e"></span>Observed by ≥ 3 views</div>
+  <div><span class="sw" style="background:#e5a83b"></span>Observed by 1–2 views</div>
+  <div><span class="sw" style="background:#c9c2b8"></span>Unobserved — no data here</div>
+</div>
+
+<div id="status">
+  <div class="spin"></div>
+  <h3>Loading 3D model…</h3>
+  <p id="status-text">Fetching dense/mesh_textured.glb</p>
+  <div id="filepick" style="display:none">
+    <p style="margin-bottom:10px">The model could not be loaded automatically.
+    Serve this folder with <code>python -m http.server</code>, or pick the GLB file by hand:</p>
+    <label>Choose GLB file<input type="file" id="glb-file" accept=".glb,.gltf"></label>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const GLB_URL = "dense/mesh_textured.glb";
+const COVERAGE_URL = null; // no coverage data for the decimated local file
+const MODEL_NAME = "mesh_textured.glb";
+
+const container = document.getElementById('viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf4f2ee);
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 10000);
+camera.up.set(0, 0, 1); // ENU model: +Z is up, not the three.js default +Y — without this the strip renders vertical on screen
+camera.position.set(10, -10, 8);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+container.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xd8d2c4, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(40, -30, 60);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xdfeaf2, 0.5);
+fill.position.set(-40, 40, -20);
+scene.add(fill);
+
+let model = null;
+let coverageCounts = null;
+let coverageOn = false;
+let savedColors = new Map(); // mesh -> original color attribute (or null)
+let homePos = null, homeTarget = null;
+
+function fitCamera(object) {
+  const box = new THREE.Box3().setFromObject(object);
+  const center = box.getCenter(new THREE.Vector3());
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const dir = new THREE.Vector3(-0.55, 1, 0.28).normalize();
+  const dist = sphere.radius * 0.9;
+  camera.position.copy(center).addScaledVector(dir, dist);
+  camera.near = Math.max(sphere.radius / 1000, 0.01);
+  camera.far = sphere.radius * 100;
+  camera.updateProjectionMatrix();
+  controls.target.copy(center);
+  controls.update();
+  homePos = camera.position.clone();
+  homeTarget = controls.target.clone();
+}
+
+const COV_COLORS = [
+  new THREE.Color(0xc9c2b8), // 0 views — unobserved
+  new THREE.Color(0xe5a83b), // 1–2 views
+  new THREE.Color(0x0f766e), // >= 3 views
+];
+
+function applyCoverage(on) {
+  if (!model || !coverageCounts) return;
+  model.traverse((child) => {
+    if (!child.isMesh) return;
+    const geo = child.geometry;
+    const pos = geo.getAttribute('position');
+    if (pos.count !== coverageCounts.length) return; // counts belong to the first mesh
+    if (!savedColors.has(child)) savedColors.set(child, geo.getAttribute('color'));
+    if (on) {
+      const colors = new Float32Array(pos.count * 3);
+      for (let i = 0; i < pos.count; i++) {
+        const n = coverageCounts[i];
+        const c = n >= 3 ? COV_COLORS[2] : (n >= 1 ? COV_COLORS[1] : COV_COLORS[0]);
+        colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+      }
+      geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      child.material.vertexColors = true;
+    } else {
+      const orig = savedColors.get(child);
+      if (orig) geo.setAttribute('color', orig);
+      else geo.deleteAttribute('color');
+      child.material.vertexColors = !!orig;
+    }
+    child.material.needsUpdate = true;
+  });
+  document.getElementById('legend').classList.toggle('show', on);
+}
+
+function showStatus(title, text, showPicker) {
+  const el = document.getElementById('status');
+  el.querySelector('h3').textContent = title;
+  document.getElementById('status-text').textContent = text;
+  el.querySelector('.spin').style.display = showPicker ? 'none' : 'block';
+  document.getElementById('filepick').style.display = showPicker ? 'block' : 'none';
+  el.style.display = 'block';
+}
+function hideStatus() { document.getElementById('status').style.display = 'none'; }
+
+async function loadCoverage() {
+  if (!COVERAGE_URL) return;
+  try {
+    const res = await fetch(COVERAGE_URL);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (Array.isArray(data.counts) && data.counts.length > 0) {
+      coverageCounts = data.counts;
+      document.getElementById('btn-coverage').style.display = '';
+    }
+  } catch (e) { console.warn('Coverage data unavailable:', e); }
+}
+
+const loader = new GLTFLoader();
+function loadModel(url, label) {
+  loader.load(url, async (gltf) => {
+    model = gltf.scene;
+    scene.add(model);
+    fitCamera(model);
+    hideStatus();
+    await loadCoverage();
+    window.__viewerModelLoaded = true;
+  }, undefined, (err) => {
+    console.error('GLB load failed:', err);
+    showStatus('Could not load the model',
+      `Tried ${label}. This usually means the page was opened as a file — browsers block model loading from file://.`,
+      true);
+    window.__viewerModelError = String(err && err.message || err);
+  });
+}
+loadModel(GLB_URL, GLB_URL);
+
+document.getElementById('glb-file').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  showStatus('Loading 3D model…', 'Reading ' + file.name, false);
+  loadModel(URL.createObjectURL(file), file.name);
+});
+
+document.getElementById('btn-wire').addEventListener('click', (e) => {
+  if (!model) return;
+  const on = !e.target.classList.contains('active');
+  e.target.classList.toggle('active', on);
+  model.traverse((c) => { if (c.isMesh) c.material.wireframe = on; });
+});
+document.getElementById('btn-orbit').addEventListener('click', (e) => {
+  controls.autoRotate = !controls.autoRotate;
+  controls.autoRotateSpeed = 1.0;
+  e.target.classList.toggle('active', controls.autoRotate);
+});
+document.getElementById('btn-coverage').addEventListener('click', (e) => {
+  coverageOn = !coverageOn;
+  e.target.classList.toggle('active', coverageOn);
+  applyCoverage(coverageOn);
+});
+document.getElementById('btn-reset').addEventListener('click', () => {
+  if (!homePos) return;
+  camera.position.copy(homePos);
+  controls.target.copy(homeTarget);
+  controls.update();
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+(function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+})();
+</script>
+</body>
+</html>

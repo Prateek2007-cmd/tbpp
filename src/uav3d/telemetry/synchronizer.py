@@ -153,9 +153,14 @@ class TelemetrySynchronizer:
         elif mode == "video":
             is_zurich = False
         else:
-            # Auto-detect from frame IDs
+            # Auto-detect from frame IDs. Video runs use frame ids like
+            # "video_000123" — they end in digits, so the numeric-suffix
+            # test below would misclassify them as Zurich; check the
+            # video_ prefix FIRST.
             sample_ids = [p.frame_id for p in poses.poses[:5]]
-            if any(fid.startswith("zurich_") for fid in sample_ids):
+            if any(fid.startswith("video_") for fid in sample_ids):
+                is_zurich = False
+            elif any(fid.startswith("zurich_") for fid in sample_ids):
                 is_zurich = True
             elif sample_ids and re.search(r"(\d+)$", sample_ids[0]):
                 is_zurich = True
@@ -343,21 +348,78 @@ class TelemetrySynchronizer:
 
         # 2. Extract telemetry samples
         tel_samples: list[TelemetryRecord] = []
+        telemetry_offset_info: dict[str, Any] | None = None
         if isinstance(raw_telemetry, list):
             tel_samples = [t for t in raw_telemetry if isinstance(t, TelemetryRecord) and t.timestamp_us is not None]
         elif isinstance(raw_telemetry, (str, Path)):
-            parsed, _ = parse_onboard_gps(raw_telemetry)
-            for zrec in parsed.values():
-                tel_samples.append(
-                    TelemetryRecord(
-                        timestamp_us=zrec.timestamp_us,
-                        frame_id=f"frame_{zrec.image_id:06d}",
-                        lat=zrec.lat,
-                        lon=zrec.lon,
-                        alt=zrec.alt,
-                        source="OnbordGPS.csv",
-                        raw_fields=dict(zrec.raw_fields) if zrec.raw_fields else None,
+            tel_path = Path(raw_telemetry)
+            if tel_path.suffix.lower() in (".bin", ".log"):
+                # ArduPilot DataFlash log: the parser does the coarse
+                # boot-TimeUS -> video-PTS alignment (sync offset from
+                # config, else the flight's campaign.json — never a
+                # silent default); Mode B's estimator then only has to
+                # find the residual sub-max_delta offset.
+                from uav3d.telemetry.dataflash_parser import parse_dataflash
+
+                parsed_bin = parse_dataflash(
+                    tel_path,
+                    sync_offset_us=self.config.dataflash_sync_offset_us,
+                )
+                tel_samples = list(parsed_bin.records)
+                telemetry_offset_info = {
+                    "telemetry_sync_offset_us": parsed_bin.sync_offset_us,
+                    "telemetry_sync_offset_source": parsed_bin.sync_offset_source,
+                }
+            elif tel_path.suffix.lower() == ".srt":
+                # DJI subtitle sidecar: SRT times are already video times,
+                # so no sync offset is needed or applied.
+                from uav3d.telemetry.srt_parser import parse_dji_srt
+
+                parsed_srt = parse_dji_srt(tel_path)
+                tel_samples = list(parsed_srt.records)
+                telemetry_offset_info = {
+                    "telemetry_sync_offset_us": 0,
+                    "telemetry_sync_offset_source": "srt_video_time (no offset needed)",
+                }
+            elif tel_path.suffix.lower() == ".xlsx":
+                # DJI AirData export: the parser anchors the first fix to
+                # video t=0 (DJI0016: xlsx t=84400 ms <-> video t=0) and
+                # applies the optional fine-scan residual offset from
+                # config (default 0). Mode B's estimator then only has to
+                # find a residual sub-max_delta offset.
+                from uav3d.telemetry.xlsx_parser import parse_dji_xlsx
+
+                parsed_xlsx = parse_dji_xlsx(
+                    tel_path,
+                    sync_offset_us=self.config.xlsx_sync_offset_us or 0,
+                )
+                tel_samples = list(parsed_xlsx.records)
+                telemetry_offset_info = {
+                    "telemetry_sync_offset_us": parsed_xlsx.sync_offset_us,
+                    "telemetry_sync_offset_source": (
+                        f"xlsx_coarse (first fix {parsed_xlsx.first_time_ms} ms "
+                        f"= video t=0; {parsed_xlsx.sync_offset_source})"
+                    ),
+                }
+            elif tel_path.suffix.lower() == ".csv":
+                parsed, _ = parse_onboard_gps(raw_telemetry)
+                for zrec in parsed.values():
+                    tel_samples.append(
+                        TelemetryRecord(
+                            timestamp_us=zrec.timestamp_us,
+                            frame_id=f"frame_{zrec.image_id:06d}",
+                            lat=zrec.lat,
+                            lon=zrec.lon,
+                            alt=zrec.alt,
+                            source="OnbordGPS.csv",
+                            raw_fields=dict(zrec.raw_fields) if zrec.raw_fields else None,
+                        )
                     )
+            else:
+                raise DataError(
+                    f"Unsupported telemetry file for Mode B sync: {tel_path} "
+                    "(expected a .BIN ArduPilot log, a .SRT DJI sidecar, "
+                    "a .xlsx AirData export, or a .csv GPS log)"
                 )
 
         if not tel_samples:
@@ -381,6 +443,7 @@ class TelemetrySynchronizer:
         # Step 2: Constant clock offset estimation
         offset_us = 0
         offset_method = "not_applicable"
+        offset_support_frames = 0
         if self.config.estimate_offset:
             candidate_diffs: list[int] = []
             for f_ts in frame_ts:
@@ -399,10 +462,29 @@ class TelemetrySynchronizer:
                 tolerance = max(bin_half_width * 1.5, 5000.0)
 
                 in_cluster = diff_arr[np.abs(diff_arr - bin_center) <= tolerance]
-                if len(in_cluster) > 0:
+                offset_support_frames = int(len(in_cluster))
+                # The peak must be SHARP: a real constant clock offset puts
+                # most frames' diffs in one bin. With sparse telemetry
+                # (PinPoint .BIN: 5 Hz fixes, 200 ms apart) the diffs spread
+                # over +-max_delta and the histogram "peak" is noise — the
+                # old code accepted ANY non-empty cluster and injected a
+                # spurious -147 ms offset on the PinPoint window run
+                # (2026-11-17), shifting matches by a fix interval. Require
+                # at least 25% of frames (and >= 10) to support the peak,
+                # else abstain (offset 0) and say so.
+                min_support = max(10, int(np.ceil(0.25 * len(frame_ts))))
+                if len(in_cluster) >= min_support:
                     offset_us = int(np.round(float(np.median(in_cluster))))
                     offset_method = "median_offset"
                     logger.info(f"Mode B: Estimated clock offset = {offset_us} µs ({offset_us / 1000.0:.2f} ms)")
+                else:
+                    offset_method = "abstained_no_sharp_peak"
+                    logger.warning(
+                        "Mode B: offset estimation abstained — histogram peak "
+                        f"holds only {len(in_cluster)}/{len(frame_ts)} frames "
+                        f"(need >= {min_support}); telemetry too sparse to "
+                        "resolve a constant clock offset, using 0 µs"
+                    )
 
         # Step 3: Re-match frames with shifted timestamps
         shifted_frame_ts = frame_ts + offset_us
@@ -503,10 +585,18 @@ class TelemetrySynchronizer:
             "matched_telemetry_frames": matched_count,
             "match_rate": round(match_rate, 4),
             "offset_us": offset_us,
+            "offset_method": offset_method,
+            "offset_support_frames": offset_support_frames,
+            "offset_support_fraction": round(offset_support_frames / max(1, total_frames), 4),
             "residual_median_ms": round(med_res_ms, 3),
             "residual_p95_ms": round(p95_res_ms, 3),
             "sync_status": sync_status,
         }
+        if telemetry_offset_info is not None:
+            # The coarse per-flight offset the parser applied BEFORE Mode
+            # B's estimator ran (e.g. flight01 1.2 s, flight02 49.4 s) —
+            # recorded so a run's sync is auditable, not assumed.
+            summary.update(telemetry_offset_info)
 
         telemetry_file = TelemetryFile(
             schema_version="1.0.0",

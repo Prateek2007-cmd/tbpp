@@ -91,6 +91,7 @@ from uav3d.models.dense import (
     DenseReport,
     DenseScaleSummary,
 )
+from uav3d.telemetry.georef import GeorefFrame
 
 logger = logging.getLogger("uav3d.dense.pipeline")
 
@@ -198,62 +199,182 @@ def _load_or_build_rectified(
     return paths, intr
 
 
-def _latlon_to_enu(lat: float, lon: float, alt: float, origin: tuple[float, float, float]) -> np.ndarray:
-    """Local east/north/up offsets in metres for a short-baseline site."""
-    radius = 6378137.0
-    lat0, lon0, alt0 = origin
-    east = math.radians(lon - lon0) * radius * math.cos(math.radians(lat0))
-    north = math.radians(lat - lat0) * radius
-    return np.array([east, north, alt - alt0], dtype=np.float64)
+@dataclass
+class GnssAlignment:
+    """Full Sim(3) alignment of the SfM frame onto the GPS ENU frame.
+
+    ``scale`` is metres per SfM unit; ``rotation``/``translation`` map SfM
+    coordinates onto ENU metres about ``origin`` such that
+    ``enu = scale * (R @ sfm) + t``. The georef.json sidecar carries this
+    so downstream stages (colouring, export) can place the model on Earth
+    instead of only scaling it.
+    """
+
+    scale: float
+    rotation: np.ndarray
+    translation: np.ndarray
+    origin: tuple[float, float, float]  # (lat, lon, alt_m) of the first GPS fix
+    frame: GeorefFrame
+    inlier_frame_ids: list[str]
+    rejected_frame_ids: list[str]
+    alignment_rms_m: float
+    outlier_threshold_m: float
+
+
+def _umeyama_residuals(
+    src: np.ndarray, dst: np.ndarray
+) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
+    """Umeyama fit plus per-point residuals under the FULL transform.
+
+    Returns ``(scale, R, t, residuals_m)`` where residuals are
+    ``||dst - (scale * R @ src + t)||`` per point. An earlier version of
+    this code reported ``||dst - scale * src||`` (rotation/translation
+    ignored), which is dominated by the centroid offset and meaningless
+    as an alignment quality number.
+    """
+    scale, rotation, translation = umeyama_similarity(src, dst)
+    aligned = (src @ rotation.T) * scale + translation
+    residuals = np.linalg.norm(dst - aligned, axis=1)
+    return scale, rotation, translation, residuals
+
+
+def resolve_gnss_alignment(
+    run_path: Path,
+    views: list[CameraView],
+    reject_k_mad: float = 5.0,
+    min_frames: int = 10,
+) -> GnssAlignment:
+    """Fit the SfM->ENU Sim(3) alignment from synced GPS fixes, robustly.
+
+    Reads ``telemetry.json`` (written by ``uav3d sync``), converts GPS
+    lat/lon/alt to local ENU metres about the first fix, and fits a
+    similarity transform from SfM camera centres onto the GPS positions.
+    Outlier rejection: after an initial fit, fixes whose residual exceeds
+    ``median + k * MAD`` are rejected and the fit is re-run on the
+    inliers. The rejected count is part of the result and is reported —
+    the fit never silently runs through bad fixes.
+
+    Raises:
+        DataError: No telemetry.json, or fewer than ``min_frames`` frames
+            with GPS fixes (before or after rejection).
+    """
+    telemetry_path = run_path / "telemetry.json"
+    if not telemetry_path.exists():
+        raise DataError(
+            "scale_source='gnss' requires telemetry.json in the run directory "
+            "(produced by 'uav3d sync')."
+        )
+    data = json.loads(telemetry_path.read_text(encoding="utf-8"))
+    records = {r.get("frame_id"): r for r in data.get("records", []) if r.get("frame_id")}
+
+    frame_ids: list[str] = []
+    src: list[np.ndarray] = []
+    gps_llh: list[tuple[float, float, float]] = []
+    for view in views:
+        rec = records.get(view.frame_id)
+        if rec is None or rec.get("lat") is None or rec.get("lon") is None:
+            continue
+        frame_ids.append(view.frame_id)
+        src.append(np.asarray(view.center, dtype=np.float64))
+        gps_llh.append(
+            (float(rec["lat"]), float(rec["lon"]), float(rec.get("alt") or 0.0))
+        )
+    if len(src) < min_frames:
+        raise DataError(
+            f"Only {len(src)} frames have GPS fixes; need at least {min_frames} "
+            "to establish metric scale."
+        )
+
+    # Origin = first GPS fix (documented choice; see telemetry/georef.py).
+    origin = gps_llh[0]
+    frame = GeorefFrame.from_first_fix(*origin)
+    dst = np.asarray([frame.to_enu(lat, lon, alt) for lat, lon, alt in gps_llh])
+    src_arr = np.asarray(src)
+
+    scale, rotation, translation, residuals = _umeyama_residuals(src_arr, dst)
+
+    # Robust rejection: median + k * MAD on the alignment residuals.
+    median_res = float(np.median(residuals))
+    mad = float(np.median(np.abs(residuals - median_res)))
+    # MAD can be ~0 when most fixes are near-perfect; fall back to the
+    # residual std so the threshold never collapses to the median itself.
+    spread = mad if mad > 1e-9 else float(np.std(residuals))
+    threshold = median_res + reject_k_mad * spread
+    inlier_mask = residuals <= threshold
+    rejected = [fid for fid, keep in zip(frame_ids, inlier_mask) if not keep]
+    kept_ids = [fid for fid, keep in zip(frame_ids, inlier_mask) if keep]
+
+    if rejected:
+        logger.info(
+            "GNSS scale: rejecting %d/%d GPS fixes as outliers "
+            "(residual > median %.2f m + %.1f*MAD = %.2f m)",
+            len(rejected),
+            len(frame_ids),
+            median_res,
+            reject_k_mad,
+            threshold,
+        )
+        if int(inlier_mask.sum()) < min_frames:
+            raise DataError(
+                f"Only {int(inlier_mask.sum())} GPS fixes survive outlier rejection; "
+                f"need at least {min_frames} to establish metric scale."
+            )
+        scale, rotation, translation, residuals = _umeyama_residuals(
+            src_arr[inlier_mask], dst[inlier_mask]
+        )
+
+    rms = float(np.sqrt(np.mean(residuals**2)))
+    logger.info(
+        "GNSS scale factor %.4f m/unit (alignment RMS %.2f m over %d fixes, "
+        "%d rejected, origin %.6f, %.6f)",
+        scale,
+        rms,
+        len(kept_ids),
+        len(rejected),
+        origin[0],
+        origin[1],
+    )
+    return GnssAlignment(
+        scale=float(scale),
+        rotation=rotation,
+        translation=translation,
+        origin=origin,
+        frame=frame,
+        inlier_frame_ids=kept_ids,
+        rejected_frame_ids=rejected,
+        alignment_rms_m=rms,
+        outlier_threshold_m=float(threshold),
+    )
 
 
 def _resolve_metric_scale(
     config: DenseConfig,
     run_path: Path,
     views: list[CameraView],
-) -> tuple[float, str, str, dict[str, float]]:
-    """Determine metres per SfM unit, and say honestly where it came from."""
+) -> tuple[float, str, str, dict[str, float], GnssAlignment | None]:
+    """Determine metres per SfM unit, and say honestly where it came from.
+
+    Returns ``(scale, source, status, extra, alignment)`` where
+    ``alignment`` is the full Sim(3) for ``gnss`` runs (used to write
+    georef.json) and ``None`` otherwise.
+    """
     if config.scale_source == "fixed":
         if config.scale_factor is None:
             raise DataError("scale_source='fixed' requires scale_factor")
-        return float(config.scale_factor), "fixed", "fixed_by_user", {}
+        return float(config.scale_factor), "fixed", "fixed_by_user", {}, None
 
     if config.scale_source == "gnss":
-        telemetry_path = run_path / "telemetry.json"
-        if not telemetry_path.exists():
-            raise DataError(
-                "scale_source='gnss' requires telemetry.json in the run directory "
-                "(produced by 'uav3d sync')."
-            )
-        data = json.loads(telemetry_path.read_text(encoding="utf-8"))
-        records = {r.get("frame_id"): r for r in data.get("records", []) if r.get("frame_id")}
-        src: list[np.ndarray] = []
-        dst: list[np.ndarray] = []
-        origin: tuple[float, float, float] | None = None
-        for view in views:
-            rec = records.get(view.frame_id)
-            if rec is None or rec.get("lat") is None or rec.get("lon") is None:
-                continue
-            lat, lon = float(rec["lat"]), float(rec["lon"])
-            alt = float(rec.get("alt") or 0.0)
-            if origin is None:
-                origin = (lat, lon, alt)
-            src.append(view.center)
-            dst.append(_latlon_to_enu(lat, lon, alt, origin))
-        if len(src) < 10:
-            raise DataError(
-                f"Only {len(src)} frames have GPS fixes; need at least 10 to establish metric scale."
-            )
-        scale, _, _ = umeyama_similarity(np.asarray(src), np.asarray(dst))
-        predicted = np.asarray(src) * scale
-        residual = float(np.sqrt(np.mean(np.sum((predicted - np.asarray(dst)) ** 2, axis=1))))
-        logger.info("GNSS scale factor %.4f m/unit (alignment RMS %.2f m)", scale, residual)
-        return float(scale), "gnss", "gnss_aligned", {
-            "gnss_alignment_rms_m": residual,
-            "gnss_frames": float(len(src)),
-        }
+        alignment = resolve_gnss_alignment(
+            run_path, views, reject_k_mad=config.gnss_reject_k_mad
+        )
+        return float(alignment.scale), "gnss", "gnss_aligned", {
+            "gnss_alignment_rms_m": alignment.alignment_rms_m,
+            "gnss_frames": float(len(alignment.inlier_frame_ids)),
+            "gnss_rejected": float(len(alignment.rejected_frame_ids)),
+            "gnss_outlier_threshold_m": alignment.outlier_threshold_m,
+        }, alignment
 
-    return 1.0, "none", "unverified_monocular_scale", {}
+    return 1.0, "none", "unverified_monocular_scale", {}, None
 
 
 def _per_view_ranges(
@@ -428,7 +549,9 @@ def run_dense(
     median_depth = median_depth_of(medians)
     ratio = median_base / median_depth if median_depth > 0 else 0.0
     sigma = depth_noise_sigma(median_depth, intrinsics.focal, median_base)
-    scale, scale_source, scale_status, scale_extra = _resolve_metric_scale(config, run_path, views)
+    scale, scale_source, scale_status, scale_extra, gnss_alignment = _resolve_metric_scale(
+        config, run_path, views
+    )
     stage_seconds["view_selection"] = time.time() - t0
 
     logger.info(
@@ -816,9 +939,14 @@ def run_dense(
             # resolved against the measured normals before the visibility filter,
             # which reads face winding.
             mesh = orient_faces(mesh, points, normals)
-            centres = np.array([v.center for v in views], dtype=np.float64)
+            # The mesh is in METRES when scale != 1 (points were scaled at
+            # export), so the camera centres must be scaled too — unscaled
+            # centres point the visibility rays at the wrong place and the
+            # filter drops real faces (or keeps back faces). Same for the
+            # weld tolerance, which is in mesh units.
+            centres = np.array([v.center for v in views], dtype=np.float64) * scale
             mesh = filter_unobserved_faces(mesh, centres)
-            mesh = weld_vertices(mesh, tolerance=voxel_units * 1e-3)
+            mesh = weld_vertices(mesh, tolerance=voxel_units * scale * 1e-3)
             # Colour the mesh from the fused cloud so the export carries the
             # captured surface appearance instead of one flat default material.
             mesh_colors = transfer_vertex_colors(mesh.vertices, points, colors)
@@ -861,12 +989,37 @@ def run_dense(
         evaluation.update(scale_extra)
         stage_seconds["evaluation"] = time.time() - t0
 
+    # --- 8b. georeferencing sidecar (gnss runs only) ----------------------
+    # The scale fit already aligned the SfM frame onto ENU metres about the
+    # first GPS fix; persist the full Sim(3) so colouring/export can place
+    # the model on Earth instead of only scaling it. No gnss fit, no file —
+    # downstream stages must never invent an origin.
+    georef_path: Path | None = None
+    if gnss_alignment is not None:
+        georef = gnss_alignment.frame.to_dict()
+        georef["source"] = "gnss"
+        georef["sim3"] = {
+            "scale_m_per_unit": gnss_alignment.scale,
+            "rotation": gnss_alignment.rotation.tolist(),
+            "translation_m": gnss_alignment.translation.tolist(),
+        }
+        georef["gnss_frames"] = len(gnss_alignment.inlier_frame_ids)
+        georef["gnss_rejected"] = len(gnss_alignment.rejected_frame_ids)
+        georef["rejected_frame_ids"] = gnss_alignment.rejected_frame_ids
+        georef["alignment_rms_m"] = gnss_alignment.alignment_rms_m
+        georef["outlier_threshold_m"] = gnss_alignment.outlier_threshold_m
+        georef_path = out_dir / "georef.json"
+        georef_path.write_text(json.dumps(georef, indent=2), encoding="utf-8")
+        logger.info("[georef] wrote %s (%s)", georef_path, georef["crs_name"])
+
     # --- 9. report ---------------------------------------------------------
     artifacts = {"cloud": str(cloud_path)}
     if mesh_path is not None:
         artifacts["mesh"] = str(mesh_path)
     if glb_path is not None:
         artifacts["glb"] = str(glb_path)
+    if georef_path is not None:
+        artifacts["georef"] = str(georef_path)
     if prior_summary is not None:
         artifacts["prior_report"] = str(out_dir / "prior_report.json")
     report = DenseReport(
@@ -905,7 +1058,24 @@ def run_dense(
         ),
         mesh=mesh_summary,
         prior=prior_summary,
-        scale=DenseScaleSummary(value=scale, source=scale_source, status=scale_status),
+        scale=DenseScaleSummary(
+            value=scale,
+            source=scale_source,
+            status=scale_status,
+            gnss_frames=len(gnss_alignment.inlier_frame_ids)
+            if gnss_alignment is not None
+            else None,
+            gnss_rejected=len(gnss_alignment.rejected_frame_ids)
+            if gnss_alignment is not None
+            else None,
+            gnss_alignment_rms_m=gnss_alignment.alignment_rms_m
+            if gnss_alignment is not None
+            else None,
+            origin_lat=gnss_alignment.origin[0] if gnss_alignment is not None else None,
+            origin_lon=gnss_alignment.origin[1] if gnss_alignment is not None else None,
+            origin_alt_m=gnss_alignment.origin[2] if gnss_alignment is not None else None,
+            crs_epsg=gnss_alignment.frame.utm_epsg if gnss_alignment is not None else None,
+        ),
         evaluation=evaluation,
         stage_seconds={k: round(v, 3) for k, v in stage_seconds.items()},
         total_seconds=round(time.time() - started, 3),

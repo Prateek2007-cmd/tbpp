@@ -31,12 +31,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-import cv2  # noqa: E402
+import cv2
 
-from uav3d.cli import main  # noqa: E402
-from uav3d.dense.evaluate import load_ply_points  # noqa: E402
-from uav3d.models.calibration_io import read_calibration  # noqa: E402
-from uav3d.sfm.focal_gate import check_focal_drift, solved_focal_px  # noqa: E402
+from uav3d.cli import main
+from uav3d.dense.evaluate import load_ply_points
+from uav3d.models.calibration_io import read_calibration
+from uav3d.sfm.focal_gate import check_focal_drift, solved_focal_px
 
 
 def _host_fs_path(path: Path) -> Path:
@@ -88,6 +88,33 @@ def stage_sfm(run_dir: Path, config: Path) -> dict:
     return poses
 
 
+def stage_sync(run_dir: Path, config: Path, telemetry: Path,
+               sync_offset_us: int | None = None,
+               sync_offset_s: float | None = None) -> dict:
+    """Sync a flight log (.BIN) against the run's poses (Phase 2).
+
+    Writes telemetry.json + poses_enriched.json into the run directory.
+    Runs after SfM and before dense, so a gnss-scale dense run can read it.
+    """
+    argv = [
+        "sync",
+        "--config", str(config),
+        "--run-dir", str(run_dir),
+        "--telemetry", str(telemetry),
+        "--mode", "video",
+    ]
+    if sync_offset_us is not None and sync_offset_s is not None:
+        raise SystemExit("Pass only one of --sync-offset-us and --sync-offset-s.")
+    if sync_offset_us is not None:
+        argv += ["--sync-offset-us", str(sync_offset_us)]
+    if sync_offset_s is not None:
+        argv += ["--sync-offset-s", str(sync_offset_s)]
+    code = main(argv)
+    if code != 0:
+        raise SystemExit(f"sync stage failed with exit code {code}")
+    return json.loads((run_dir / "telemetry.json").read_text())
+
+
 def stage_dense(run_dir: Path, config: Path, max_width: int, ref_stride: int,
                 mesh: bool, prior: bool = False) -> dict:
     argv = [
@@ -105,6 +132,34 @@ def stage_dense(run_dir: Path, config: Path, max_width: int, ref_stride: int,
     if code != 0:
         raise SystemExit(f"dense stage failed with exit code {code}")
     return json.loads((run_dir / "dense" / "dense_report.json").read_text())
+
+
+def stage_viewer(run_dir: Path) -> None:
+    """Phase 4: coverage report + viewer.html for a finished dense run.
+
+    Non-fatal by design — a missing mesh or missing depth maps only ever
+    warns; the pipeline result stands on its own. Runs whenever dense output
+    exists, including a `--stage dense` re-run on an existing run dir.
+    """
+    dense_dir = run_dir / "dense"
+    if not (dense_dir / "dense_report.json").exists():
+        return
+    print("\n--- viewer ---")
+    try:
+        from uav3d.coverage import coverage_report_for_run
+
+        report = coverage_report_for_run(run_dir)
+        print(f"COVERAGE  {report['summary']}")
+    except Exception as exc:  # noqa: BLE001 - viewer stage is advisory
+        print(f"COVERAGE  skipped: {exc}")
+    try:
+        from uav3d.modeling.dashboard import generate_viewer_html
+
+        viewer = generate_viewer_html(run_dir)
+        print(f"VIEWER    {viewer}")
+        print(f"          serve with: cd {run_dir} && python -m http.server 8000")
+    except Exception as exc:  # noqa: BLE001 - viewer stage is advisory
+        print(f"VIEWER    skipped: {exc}")
 
 
 def summarise(video: Path, info: dict, run_dir: Path, poses: dict | None, dense: dict | None) -> bool:
@@ -142,14 +197,15 @@ def summarise(video: Path, info: dict, run_dir: Path, poses: dict | None, dense:
         # gate flags it; it never clamps the focal.
         if stored is not None:
             try:
+                # No explicit max_rel_drift: follows the module default (5%,
+                # Pix4D's green threshold — see uav3d/sfm/focal_gate.py).
                 gate = check_focal_drift(
                     solved_focal_px(stored.model, list(stored.params)),
                     solved_focal_px(model, list(solved["params"])),
-                    max_rel_drift=0.10,
                 )
                 print(f"          focal drift {gate.message}")
                 if gate.exceeded:
-                    print("  WARNING  focal drift exceeds the 10% gate; the model "
+                    print("  WARNING  focal drift exceeds the 5% gate; the model "
                           "may be stretched along the flight axis — consider "
                           "re-running with refine_intrinsics=false")
                     ok = False
@@ -187,6 +243,45 @@ def summarise(video: Path, info: dict, run_dir: Path, poses: dict | None, dense:
             if reproj is not None and reproj > 1.5:
                 print(f"  WARNING  reprojection {reproj:.3f} px exceeds the 1.5 px gate")
                 ok = False
+
+    telemetry_path = run_dir / "telemetry.json"
+    if telemetry_path.exists():
+        try:
+            tel = json.loads(telemetry_path.read_text())
+        except json.JSONDecodeError:
+            tel = {}
+        summary = tel.get("summary") or {}
+        matched = summary.get("matched_telemetry_frames")
+        total = summary.get("total_frames")
+        rate = summary.get("match_rate")
+        print(f"SYNC      {matched}/{total} frames matched "
+              f"({100.0 * (rate or 0):.1f}%), status {tel.get('sync_status')}, "
+              f"offset {tel.get('offset_us')} µs")
+        if rate is not None and rate < 0.8:
+            print(f"  WARNING  telemetry match rate {100.0 * rate:.1f}% is below "
+                  "the 80% gate; scale and georeferencing rest on few fixes")
+            ok = False
+        # GPS-trajectory residual (Phase 1 check): the metric check
+        # reprojection error cannot do. Advisory only — never fails the run.
+        poses_path = run_dir / "poses.json"
+        if poses_path.exists():
+            try:
+                from uav3d.models.poses import PosesFile
+                from uav3d.models.telemetry import TelemetryFile
+                from uav3d.validation.gps_residual import gps_residual_from_files
+
+                residual = gps_residual_from_files(
+                    PosesFile.model_validate_json(poses_path.read_text()),
+                    TelemetryFile.model_validate_json(telemetry_path.read_text()),
+                )
+                if residual is not None:
+                    print(f"GPS-RES   median {residual.median_m:.2f} m, "
+                          f"p95 {residual.p95_m:.2f} m, max {residual.max_m:.2f} m "
+                          f"over {residual.num_matched_frames} frames "
+                          f"(scale {residual.scale_factor:.3f} m/unit, "
+                          f"{residual.fit_condition})")
+            except Exception as exc:  # noqa: BLE001 - advisory only
+                print(f"GPS-RES   check unavailable: {exc}")
 
     if dense is not None:
         geometry = dense.get("geometry") or {}
@@ -250,9 +345,31 @@ def main_cli() -> int:
     parser.add_argument("--mesh", action="store_true", help="Also build the visualisation mesh")
     parser.add_argument("--prior", action="store_true",
                         help="Fill MVS-invalid pixels with a monocular depth prior (default off)")
+    parser.add_argument(
+        "--telemetry",
+        type=Path,
+        default=None,
+        help="Flight-log telemetry to sync against the video (ArduPilot .BIN). "
+             "Adds a sync stage after SfM (telemetry.json + poses_enriched.json) "
+             "so dense can resolve metric scale and georeferencing.",
+    )
+    parser.add_argument(
+        "--sync-offset-us",
+        type=int,
+        default=None,
+        help="Coarse video↔log sync offset in µs for .BIN telemetry "
+             "(per-flight; default: the flight's campaign.json next to the .BIN; "
+             "fails loudly if neither is available)",
+    )
+    parser.add_argument(
+        "--sync-offset-s",
+        type=float,
+        default=None,
+        help="Same as --sync-offset-us, in seconds (e.g. 49.4 for PinPoint flight02).",
+    )
     parser.add_argument("--preview", action="store_true",
                         help="Quick pass at 640 px to prove the chain works before the full run")
-    parser.add_argument("--stage", choices=("keyframes", "sfm", "dense", "all"), default="all",
+    parser.add_argument("--stage", choices=("keyframes", "sfm", "sync", "dense", "all"), default="all",
                         help="Stop after a given stage, or reuse earlier stages")
     parser.add_argument("--run-dir", type=Path, default=None,
                         help="Reuse an existing run directory instead of creating one")
@@ -300,6 +417,14 @@ def main_cli() -> int:
         print("\n--- sfm ---")
         poses = stage_sfm(run_dir, config)
 
+    if args.telemetry and args.stage in ("sfm", "sync", "dense", "all"):
+        print("\n--- sync ---")
+        telemetry_path = _host_fs_path(args.telemetry)
+        if not telemetry_path.exists():
+            raise SystemExit(f"Telemetry file not found: {telemetry_path}")
+        stage_sync(run_dir, config, telemetry_path, args.sync_offset_us,
+                   args.sync_offset_s)
+
     if args.stage in ("dense", "all"):
         print("\n--- dense ---")
         dense = stage_dense(run_dir, config, args.max_width, args.ref_stride,
@@ -309,6 +434,7 @@ def main_cli() -> int:
             poses = json.loads(poses_path.read_text()) if poses_path.exists() else None
 
     summarise(video, info, run_dir, poses, dense)
+    stage_viewer(run_dir)
     print(f"Wall time: {time.time() - started:.1f} s")
     return 0
 

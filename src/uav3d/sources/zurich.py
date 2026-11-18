@@ -254,6 +254,7 @@ class ZurichSequenceSource(ImageSource):
                         height=DEFAULT_HEIGHT,
                         params=params,
                         source=str(self.calib_file.name),
+                        provenance="measured",
                     )
             except (OSError, ValueError, KeyError) as exc:
                 logger.warning(f"Could not load calibration from {self.calib_file}: {exc}")

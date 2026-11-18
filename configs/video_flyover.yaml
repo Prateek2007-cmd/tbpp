@@ -13,10 +13,16 @@
 #     CLI pins one shared focal for video runs, because refining fx and fy
 #     independently on forward flight produces a physically impossible aspect
 #     ratio (measured 1.69 on synthetic footage).
-#   * refine_intrinsics is true, because the 0.8*width focal guess can be off by
-#     tens of percent on real cameras. With one shared focal the refinement has
-#     only a scale-like degree of freedom to spend, so it is safe to enable.
-#     Check the exported fx/fy afterwards: it must be exactly 1.0.
+#   * refine_intrinsics is FALSE for single-pass video. Free refinement is
+#     unstable on forward flight: the Nov 16 focal experiment
+#     (docs/HANDOFF_NEXT_SESSION.md §12) solved 447 px once and 492 px the
+#     next run on identical synthetic data (true focal 265 px), while
+#     reprojection error stayed ~0.28 px throughout — a straight strip is a
+#     critical motion sequence, so focal trades against depth/scale and the
+#     error is invisible to reproj. Lock the prior focal and get a real one
+#     from calibration / EXIF / sensor spec instead (see Phase 1 of the plan
+#     in ~/workspace/tbpp-audit/AUDIT_AND_PLAN.md). The focal-drift gate
+#     (sfm/focal_gate.py) flags solved-vs-prior drift when refinement is on.
 #   * min_blur is lowered: video compression softens frames compared with the
 #     Zurich stills.
 
@@ -44,7 +50,22 @@ sfm:
   single_camera: true
   seq_overlap: 15
   max_image_size: 1600
-  refine_intrinsics: true
+  refine_intrinsics: false
+  # --- Focal length (Phase 1). Without one of these the pipeline falls back
+  # to the 0.8 * width guess, which on forward flight can stretch the whole
+  # model while reprojection error stays low. Uncomment ONE path, best first:
+  #   1. measured pre-flight calibration (best):  focal_px: 265.0
+  #   2. still with the same settings:            exif_image: "data/still.jpg"
+  #      (+ sensor dims below, unless the still's EXIF carries FocalPlane tags)
+  #   3. spec sheet:  focal_mm: 12.29  +  sensor_format: "4/3"
+  #      (formats: "4/3", "1-inch", "1/1.3-inch"; or sensor_width_mm /
+  #      sensor_height_mm explicitly). NEVER the 35mm-equivalent focal.
+  # focal_px: null
+  # focal_mm: null
+  # sensor_width_mm: null
+  # sensor_height_mm: null
+  # sensor_format: null
+  # exif_image: null
   feature_type: "SIFT"
   matcher_type: "sequential"
   min_num_matches: 20

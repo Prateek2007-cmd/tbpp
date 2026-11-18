@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>GrapeSLAM DJI_0016 — flight map (vineyard, Spain)</title>
+<link rel="stylesheet" href="../../leaflet/leaflet.css">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         background: #faf8f4; color: #1f2937; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px;
+            padding: 14px 20px 10px; background: #ffffff; border-bottom: 1px solid #e5e0d8; }
+  header h1 { font-size: 20px; margin: 0; font-weight: 700; color: #111827; }
+  header .sub { font-size: 13px; color: #6b7280; }
+  header .badge { font-size: 12px; font-weight: 600; letter-spacing: .04em; color: #0f766e;
+                   background: #e6f4f1; border: 1px solid #bfe6df; border-radius: 999px; padding: 3px 10px; }
+  header a.back { margin-left: auto; font-size: 14px; font-weight: 600; color: #ffffff;
+                   background: #0f766e; text-decoration: none; padding: 8px 14px; border-radius: 8px; }
+  header a.back:hover { background: #0d5f59; }
+  main { display: flex; min-height: calc(100vh - 62px); }
+  #map { flex: 1; min-height: 420px; background: #eef0ea; }
+  aside { width: 330px; flex-shrink: 0; background: #ffffff; border-left: 1px solid #e5e0d8;
+          padding: 18px 20px; overflow-y: auto; }
+  aside h2 { font-size: 15px; margin: 0 0 10px; color: #111827; }
+  .stat { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0;
+          border-bottom: 1px solid #f1ede6; font-size: 14px; }
+  .stat span { color: #6b7280; } .stat b { text-align: right; font-weight: 600; color: #111827; }
+  .section { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+             color: #0f766e; margin: 18px 0 6px; }
+  .section:first-child { margin-top: 0; }
+  .note { font-size: 13px; line-height: 1.55; color: #4b5563; margin: 8px 0; }
+  .legend { font-size: 13px; line-height: 1.9; color: #374151; }
+  .sw { display: inline-block; width: 22px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 8px; }
+  .sw.poly { height: 12px; border: 2px solid #d97706; background: rgba(217,119,6,.15); }
+  footer { padding: 10px 20px; font-size: 12px; color: #9ca3af; background: #ffffff;
+           border-top: 1px solid #e5e0d8; }
+  @media (max-width: 760px) {
+    main { flex-direction: column; }
+    #map { min-height: 62vh; }
+    aside { width: auto; border-left: none; border-top: 1px solid #e5e0d8; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="badge">SIH 2026 &middot; NTRO PS-26158</span>
+  <h1>GrapeSLAM DJI_0016 &mdash; flight map</h1>
+  <span class="sub">Vineyard site, Spain &middot; Phantom 4 RTK, 4K video + xlsx telemetry</span>
+  <a class="back" href="../">&larr; Back to 3D viewer</a>
+</header>
+<main>
+  <div id="map"></div>
+  <aside>
+    <div class="section">What you are seeing</div>
+    <div class="legend">
+      <span class="sw" style="background:#0f766e"></span>GPS flight path &mdash; 119 camera positions<br>
+      <span class="sw poly"></span>Model footprint &mdash; mesh bounding box<br>
+      <span style="color:#d97706">&#9679;</span> ENU origin &mdash; first GPS fix (video_000040)
+    </div>
+    <div class="section">Accuracy &mdash; the real proof</div>
+    <div class="stat"><span>GPS residual, median</span><b>0.049 m (4.9 cm)</b></div>
+    <div class="stat"><span>Held-out fixes (never in BA)</span><b>0.048 m &middot; n = 11</b></div>
+    <div class="stat"><span>Frames registered</span><b>119/120 (99.2%)</b></div>
+    <div class="stat"><span>Reprojection error</span><b>0.791 px</b></div>
+    <div class="stat"><span>Focal length</span><b>2560 px &middot; locked</b></div>
+    <div class="stat"><span>Georeferencing</span><b>EPSG:32629 (UTM 29N)</b></div>
+    <div class="section">Model footprint</div>
+    <div class="stat"><span>East&ndash;west span</span><b>57.8 m</b></div>
+    <div class="stat"><span>North&ndash;south span</span><b>18.5 m</b></div>
+    <div class="stat"><span>Height span</span><b>6.4 m</b></div>
+    <div class="stat"><span>Mesh</span><b>2,836,251 verts</b></div>
+    <div class="stat"><span>Dense points</span><b>9,842,410</b></div>
+    <div class="section">Origin</div>
+    <p class="note">ENU origin = first GPS fix matched to a keyframe
+    (video_000040): 41.93783437&deg; N, -8.792473366&deg; E,
+    52.29 m MSL. Model coordinates are ENU metres about this
+    point; scale 1.000 m/unit from GPS pose-prior bundle adjustment
+    (105 priors, &sigma; 3.0 m).</p>
+    <div class="section">Sources</div>
+    <p class="note">Flight path: camera centres from <code>poses.json</code>
+    (119 registered frames). Footprint: bounding box of the textured mesh
+    (<code>dense/mesh.obj</code>, raw ENU axes). Coordinates converted
+    ENU &rarr; lat/lon with the repo's own <code>GeorefFrame.from_enu</code>
+    (exact ECEF) and the <code>dense/georef.json</code> origin. No coordinate
+    on this page is sketched or estimated.</p>
+  </aside>
+</main>
+<footer>tbpp &middot; SIH 2026 PS 26158 &middot; Single-pass drone video to accurate 3D model &middot;
+Map data &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</footer>
+<script src="../../leaflet/leaflet.js"></script>
+<script>
+var flightPath = [[41.937834, -8.7924732], [41.9378342, -8.7924731], [41.9378345, -8.7924731], [41.9378346, -8.792473], [41.9378344, -8.7924732], [41.9378338, -8.7924739], [41.9378333, -8.7924748], [41.937833, -8.7924763], [41.9378328, -8.7924782], [41.9378325, -8.7924805], [41.9378319, -8.7924836], [41.9378311, -8.7924867], [41.9378302, -8.7924899], [41.9378294, -8.7924929], [41.9378286, -8.7924963], [41.9378277, -8.7924999], [41.9378269, -8.7925036], [41.937826, -8.7925075], [41.9378252, -8.792511], [41.9378245, -8.7925144], [41.9378239, -8.7925179], [41.9378233, -8.7925211], [41.9378228, -8.7925244], [41.9378224, -8.7925273], [41.9378221, -8.7925304], [41.937822, -8.7925332], [41.9378218, -8.792536], [41.9378219, -8.7925371], [41.9378219, -8.7925373], [41.9378219, -8.792538], [41.9378219, -8.7925396], [41.9378217, -8.7925419], [41.9378215, -8.792545], [41.9378211, -8.7925485], [41.9378207, -8.792553], [41.9378204, -8.7925578], [41.93782, -8.7925626], [41.9378195, -8.7925681], [41.9378192, -8.7925735], [41.9378189, -8.7925794], [41.9378184, -8.7925855], [41.9378181, -8.7925912], [41.9378178, -8.7925972], [41.9378175, -8.7926032], [41.9378169, -8.7926089], [41.9378165, -8.792615], [41.937816, -8.7926207], [41.9378153, -8.7926267], [41.9378147, -8.7926326], [41.9378139, -8.7926379], [41.937813, -8.7926437], [41.9378123, -8.7926489], [41.9378112, -8.7926545], [41.9378099, -8.7926604], [41.9378089, -8.7926658], [41.9378078, -8.7926714], [41.9378069, -8.7926765], [41.9378056, -8.7926824], [41.9378044, -8.7926884], [41.9378035, -8.7926943], [41.9378029, -8.7927008], [41.9378023, -8.7927066], [41.9378015, -8.7927131], [41.9378004, -8.7927199], [41.9377993, -8.7927263], [41.9377984, -8.7927333], [41.9377977, -8.7927399], [41.9377968, -8.7927475], [41.937796, -8.7927552], [41.9377952, -8.7927622], [41.937794, -8.7927701], [41.9377927, -8.7927775], [41.9377914, -8.7927855], [41.9377902, -8.7927936], [41.937789, -8.7928014], [41.9377878, -8.7928099], [41.9377864, -8.7928177], [41.9377849, -8.7928263], [41.9377832, -8.7928352], [41.9377817, -8.7928435], [41.9377798, -8.7928526], [41.9377781, -8.7928616], [41.9377766, -8.79287], [41.9377754, -8.7928789], [41.9377745, -8.7928872], [41.9377737, -8.7928963], [41.9377729, -8.7929058], [41.9377722, -8.7929147], [41.9377715, -8.7929242], [41.9377708, -8.7929329], [41.9377701, -8.7929418], [41.9377692, -8.7929509], [41.9377682, -8.7929593], [41.9377669, -8.7929682], [41.9377659, -8.7929758], [41.9377652, -8.7929826], [41.9377646, -8.7929885], [41.9377638, -8.7929935], [41.9377629, -8.7929985], [41.937762, -8.793003], [41.9377608, -8.7930082], [41.9377596, -8.7930138], [41.9377584, -8.7930195], [41.9377571, -8.7930262], [41.937756, -8.7930332], [41.9377547, -8.7930415], [41.9377534, -8.7930506], [41.9377521, -8.7930597], [41.9377508, -8.7930701], [41.9377498, -8.7930802], [41.9377486, -8.7930914], [41.9377475, -8.793103], [41.9377466, -8.793114], [41.9377454, -8.7931259], [41.9377446, -8.7931344], [41.9377443, -8.7931373], [41.9377442, -8.7931378], [41.9377442, -8.7931376], [41.9377441, -8.7931374]];
+var footprint = [[41.9377057, -8.7932087], [41.9377057, -8.7925112], [41.9378724, -8.7925112], [41.9378724, -8.7932087]];
+var origin = [41.93783437, -8.792473366];
+var centre = [41.9377891, -8.7928599];
+var map = L.map('map', { zoomControl: true }).setView(centre, 19);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+var poly = L.polygon(footprint, { color: '#d97706', weight: 2.5, fillColor: '#d97706',
+  fillOpacity: 0.12 }).addTo(map);
+poly.bindPopup('<b>Model footprint</b><br>Mesh bounding box: 57.8 &times; 18.5 m<br>' +
+  'ENU E &minus;60.98&hellip;&minus;3.14 m, N &minus;14.29&hellip;+4.23 m');
+var line = L.polyline(flightPath, { color: '#0f766e', weight: 3, opacity: 0.9 }).addTo(map);
+line.bindPopup('<b>GPS flight path</b><br>119 camera positions from poses.json<br>' +
+  'Phantom 4 RTK, forward-looking, one pass along the vine rows.');
+L.circleMarker(origin, { radius: 7, color: '#d97706', fillColor: '#d97706', fillOpacity: 0.9, weight: 2 }).addTo(map).bindPopup(
+  '<b>ENU origin</b><br>First GPS fix (video_000040)<br>' +
+  '41.93783437&deg; N, -8.792473366&deg; E<br>52.29 m MSL &middot; EPSG:32629');
+L.circleMarker(flightPath[0], { radius: 6, color: '#0f766e', fillColor: '#0f766e', fillOpacity: 0.9, weight: 2 }).addTo(map)
+  .bindPopup('<b>Flight start</b><br>video_000000 (hover, before first fix)');
+L.circleMarker(flightPath[flightPath.length - 1], { radius: 6, color: '#0f766e', fillColor: '#0f766e', fillOpacity: 0.9, weight: 2 }).addTo(map)
+  .bindPopup('<b>Flight end</b><br>video_001605, last registered frame');
+map.fitBounds(L.latLngBounds(footprint).pad(0.35));
+window.__mapReady = true;
+</script>
+</body>
+</html>

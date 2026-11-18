@@ -47,14 +47,14 @@ def export_model(
       - mesh.ply             reconstructed surface triangle mesh (solid 3D surface)
       - mesh_decimated.ply   optimized surface mesh for lightweight viewing
       - cloud_dense.ply      dense colored 3D point cloud from AI depth
-      - map_3d.ply           full completed 3D map (terrain + volumetric structures)
-      - map_3d.glb           WebGL/3D viewer asset (Three.js / Cesium)
-      - orthomosaic.png      top-down 2D orthomosaic aerial map
-      - dsm_elevation.png    Digital Surface Model (elevation heatmap)
       - model/               COLMAP sparse model in text format
                              (cameras.txt, images.txt, points3D.txt)
       - trajectory.ply       camera-center flight path (vertices + edges)
       - reconstruction_summary.json  versioned machine-readable manifest
+
+    NOTE (Phase 4): the old map_3d.* / orthomosaic.png / dsm_elevation.png
+    outputs are gone — they came from the quarantined completion code
+    (uav3d.modeling.legacy), which invents unobserved geometry.
 
     Args:
         reconstruction: Selected pycolmap.Reconstruction (largest model).
@@ -96,26 +96,13 @@ def export_model(
     # --- 4. Dense colored point cloud and surface mesh ---
     mesh_ply, mesh_decimated_ply, cloud_dense_ply = _generate_dense_model_and_mesh(run_path)
 
-    # --- 5. Full 3D Map Completion (Volumetric structures + continuous terrain + Orthomosaic + DSM) ---
+    # --- 5. Full 3D Map Completion — REMOVED (Phase 4 quarantine) ---
+    # build_full_3d_map (symmetry completion, wall extrusion, terrain
+    # inpainting) invents geometry that was never observed. It lives in
+    # uav3d.modeling.legacy now and must never run on a pipeline path.
+    # map_3d_* / orthomosaic / DSM stay None: unobserved surfaces are
+    # reported as unobserved (see uav3d.coverage), never filled in.
     map_3d_ply, map_3d_glb, orthomosaic_png, dsm_png = None, None, None, None
-    if cloud_dense_ply and cloud_dense_ply.exists():
-        try:
-            from uav3d.modeling.completion import build_full_3d_map
-
-            tsdf_mesh = mesh_ply if mesh_ply and mesh_ply.exists() else None
-            m_ply, m_glb, o_png, d_png = build_full_3d_map(
-                cloud_dense_ply, run_path, existing_mesh=tsdf_mesh
-            )
-            if m_ply.exists():
-                map_3d_ply = m_ply
-            if m_glb.exists():
-                map_3d_glb = m_glb
-            if o_png.exists():
-                orthomosaic_png = o_png
-            if d_png.exists():
-                dsm_png = d_png
-        except Exception as exc:
-            logger.warning(f"Full 3D map completion skipped or non-fatal: {exc}")
 
     # --- 6. Versioned summary manifest ---
     summary = ReconstructionSummary(
@@ -195,21 +182,14 @@ def _filter_point_cloud_outliers(model_ply: Path) -> int:
 def _generate_dense_model_and_mesh(run_path: Path) -> tuple[Path | None, Path | None, Path | None]:
     """Generate dense point cloud (cloud_dense.ply) and surface mesh (mesh.ply).
 
-    Primary path: multi-view TSDF fusion with robust disparity alignment
-    (uav3d.modeling.dense). Falls back to the legacy per-frame backprojection
-    when TSDF fusion cannot run (missing checkpoint/model) or produces no mesh.
+    The TSDF dense path (formerly ``uav3d.modeling.dense``) was quarantined in
+    Phase 4 — the primary plane-sweep MVS in ``uav3d.dense`` is the only dense
+    path. This function now goes straight to the legacy per-frame
+    backprojection fallback.
+
     Returns:
         (mesh_ply, mesh_decimated_ply, cloud_dense_ply)
     """
-    try:
-        from uav3d.modeling.dense import generate_dense_and_mesh_tsdf
-
-        result = generate_dense_and_mesh_tsdf(run_path)
-        if result is not None and any(p is not None for p in result):
-            return result
-        logger.info("TSDF dense fusion unavailable; using legacy backprojection path")
-    except Exception as exc:
-        logger.warning(f"TSDF dense fusion failed ({exc}); using legacy backprojection path")
 
     mesh_ply = run_path / "mesh.ply"
     mesh_decimated_ply = run_path / "mesh_decimated.ply"

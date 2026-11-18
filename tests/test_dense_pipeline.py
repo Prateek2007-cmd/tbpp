@@ -233,6 +233,15 @@ def test_prior_sky_guard_defaults_on() -> None:
     assert DenseConfig(prior_sky_guard=False).prior_sky_guard is False
 
 
+def test_mesh_voxel_fraction_defaults_coarse() -> None:
+    """Final polish: the old 1.5 default meshed the acceptance run at
+    3.36M verts / 162 MB — too heavy to demo and an OOM risk on 4M-point
+    clouds. The default is now 5.0, mirroring the proven UAVLight
+    direct-mesh ratio (~3.3x coarser)."""
+    assert DenseConfig().mesh_voxel_fraction == 5.0
+    assert DenseConfig(mesh_voxel_fraction=1.5).mesh_voxel_fraction == 1.5
+
+
 def test_load_sparse_points_prefers_fresh_colmap_over_stale_npz(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

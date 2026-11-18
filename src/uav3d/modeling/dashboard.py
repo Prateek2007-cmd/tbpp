@@ -1,520 +1,667 @@
-"""Interactive 3D WebGL and 2D GIS Dashboard for UAV-3D reconstructions.
+"""Interactive 3D viewer for UAV-3D reconstructions (Phase 4).
 
-Generates a standalone viewer.html that allows interactive orbit navigation
-around the completed 3D digital twin (map_3d.glb), inspection of the 2D orthomosaic,
-and examination of the digital surface model (DSM) elevation heatmap.
+Generates a standalone ``viewer.html`` in a run directory that loads the run's
+own GLB (``dense/mesh.glb``) with Three.js and shows the run's REAL measured
+numbers next to it — registration rate, reprojection error, accuracy
+(precision@1m / precision@0.5m as percentages, when ground truth was scored),
+coverage %, per-stage runtimes, and scale provenance. A metric that was not
+measured is shown as "not measured", never as a placeholder.
+
+Light theme, one accent colour, no gimmicks: the model is the whole point.
+
+Fully offline: Three.js is vendored (``viewer_assets/``, three 0.160.0, MIT)
+and copied next to the viewer, so no CDN or network access is needed at demo
+time. The page still needs HTTP, not ``file://`` — ES modules and GLB fetches
+are blocked from ``file://`` by browser CORS policy:
+
+    cd data/outputs/run_<timestamp> && python -m http.server 8000
+
+then open http://localhost:8000/viewer.html. If the model fails to load (e.g.
+the page was opened as a file), the page offers a file picker so the GLB can
+be loaded by hand instead.
 """
 
 from __future__ import annotations
 
+import html
 import json
 import logging
+import shutil
 from pathlib import Path
+
+from uav3d.exceptions import DataError
 
 logger = logging.getLogger("uav3d.modeling.dashboard")
 
+#: Pinned Three.js version — vendored in viewer_assets/, never fetched.
+THREE_VERSION = "0.160.0"
 
-def generate_viewer_html(run_dir: Path) -> Path:
-    """Generate interactive viewer.html in the specified run directory.
+#: Vendored Three.js files, copied next to viewer.html at generation time.
+VIEWER_ASSETS_DIR = Path(__file__).resolve().parent / "viewer_assets"
+
+#: GLB candidates, in preference order, relative to the run directory.
+GLB_CANDIDATES = ("dense/mesh.glb", "map_3d.glb", "mesh.glb")
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _fmt(value: object, suffix: str = "", decimals: int = 2) -> str:
+    """Format a measured number, or 'not measured' when it is absent."""
+    if value is None:
+        return "not measured"
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return f"{value:.{decimals}f}{suffix}"
+    return str(value)
+
+
+def _fmt_pct(fraction: object, decimals: int = 1) -> str:
+    if fraction is None or not isinstance(fraction, (int, float)):
+        return "not measured"
+    return f"{100.0 * fraction:.{decimals}f}%"
+
+
+def _fmt_seconds(seconds: object) -> str:
+    if seconds is None or not isinstance(seconds, (int, float)):
+        return "not measured"
+    if seconds < 60:
+        return f"{seconds:.1f} s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {secs:04.1f}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)}h {int(minutes):02d}m"
+
+
+def _scale_provenance(dense: dict) -> str:
+    scale = dense.get("scale") or {}
+    status = scale.get("status")
+    value = scale.get("value")
+    if status == "gnss_aligned" and isinstance(value, (int, float)):
+        frames = scale.get("gnss_frames")
+        rms = scale.get("gnss_alignment_rms_m")
+        detail = f"{value:.3f} m/unit"
+        if isinstance(frames, int):
+            detail += f", {frames} GNSS fixes"
+        if isinstance(rms, (int, float)):
+            detail += f", RMS {rms:.3f} m"
+        return f"GNSS scale — {detail}"
+    if status == "unverified_monocular_scale":
+        return "Unverified monocular scale — distances are ratios, not metres"
+    if status == "none" or value is None:
+        return "No scale — SfM units, not metres"
+    if isinstance(value, (int, float)):
+        return f"Scale {value:.3f} m/unit ({status})"
+    return "not measured"
+
+
+#: Run-root score files written by external scorers (e.g.
+#: scripts/score_uavlight.py), checked when the dense stage's own evaluation
+#: is absent. Schema: ``clouds.<name>.precision_at_1m_pct`` /
+#: ``precision_at_0.5m_pct`` (percent) and ``median_error_m``.
+SCORE_FILES = ("uavlight_score.json", "score.json")
+
+
+def _read_accuracy_score(run_dir: Path) -> tuple[dict, str | None]:
+    """Read accuracy from an external scorer's run-root score JSON.
+
+    Returns (values, source label) or ({}, None) when no score file with
+    usable numbers is present. Prefers the dense cloud (the mesh the viewer
+    shows); percentages are converted to fractions.
+    """
+    for name in SCORE_FILES:
+        data = _read_json(run_dir / name)
+        clouds = data.get("clouds")
+        if not isinstance(clouds, dict) or not clouds:
+            continue
+        entry_name, entry = None, None
+        for key in ("dense_fused", "dense", "sparse_colmap_raw"):
+            if key in clouds:
+                entry_name, entry = key, clouds[key]
+                break
+        if entry is None:
+            entry_name, entry = next(iter(clouds.items()))
+        if not isinstance(entry, dict):
+            continue
+        values: dict = {}
+        p1 = entry.get("precision_at_1m_pct")
+        p05 = entry.get("precision_at_0.5m_pct")
+        med = entry.get("median_error_m")
+        if isinstance(p1, (int, float)):
+            values["precision_at_1m"] = p1 / 100.0
+        if isinstance(p05, (int, float)):
+            values["precision_at_0_5m"] = p05 / 100.0
+        if isinstance(med, (int, float)):
+            values["median_error_m"] = med
+        if values:
+            return values, f"ground-truth scoring ({name}, {entry_name} cloud)"
+    return {}, None
+
+
+def collect_viewer_stats(run_dir: Path) -> dict:
+    """Gather the run's measured numbers from its report JSONs.
+
+    Every value is either a real measured number or ``None`` (rendered as
+    "not measured"). Nothing here is invented, estimated, or defaulted.
+    """
+    poses = _read_json(run_dir / "poses.json")
+    dense = _read_json(run_dir / "dense" / "dense_report.json")
+    coverage = _read_json(run_dir / "dense" / "coverage_report.json")
+
+    metrics = poses.get("metrics") or {}
+    geometry = dense.get("geometry") or {}
+    depth = dense.get("depth") or {}
+    fusion = dense.get("fusion") or {}
+    evaluation = dense.get("evaluation") or {}
+    stage_seconds = dense.get("stage_seconds") or {}
+
+    registered = metrics.get("num_images_registered")
+    total = metrics.get("num_images_total")
+    if isinstance(registered, int) and isinstance(total, int) and total > 0:
+        registration = f"{registered}/{total} ({100.0 * registered / total:.1f}%)"
+    else:
+        registration = None
+
+    # Evaluation keys are precision_at_0.5m / precision_at_1.0m (see
+    # dense/evaluate.py); accept the "1m" spelling too, defensively.
+    precision_1m = evaluation.get("precision_at_1.0m", evaluation.get("precision_at_1m"))
+    precision_05m = evaluation.get("precision_at_0.5m")
+    median_error_m = evaluation.get("accuracy_median")
+
+    # Fallback: an external scorer may have written a run-root score JSON
+    # (e.g. uavlight_score.json) when the dense stage itself did not score
+    # against ground truth. Fill each missing field from it; the dense
+    # evaluation always wins per field.
+    accuracy_source = None
+    if precision_1m is None or precision_05m is None or median_error_m is None:
+        scored, accuracy_source = _read_accuracy_score(run_dir)
+        if precision_1m is None:
+            precision_1m = scored.get("precision_at_1m")
+        if precision_05m is None:
+            precision_05m = scored.get("precision_at_0_5m")
+        if median_error_m is None:
+            median_error_m = scored.get("median_error_m")
+        if (
+            precision_1m is None
+            and precision_05m is None
+            and median_error_m is None
+        ):
+            accuracy_source = None
+
+    stats: dict = {
+        "dataset_label": dense.get("dataset_label") or poses.get("dataset_label"),
+        "registration": registration,
+        "reprojection_px": metrics.get("mean_reprojection_error_px"),
+        "sparse_points": metrics.get("num_points3D"),
+        "dense_points": fusion.get("num_points"),
+        "mesh_vertices": (dense.get("mesh") or {}).get("num_vertices"),
+        "mesh_faces": (dense.get("mesh") or {}).get("num_faces"),
+        "depth_valid_fraction": depth.get("valid_fraction"),
+        "median_error_m": median_error_m,
+        "precision_at_1m": precision_1m,
+        "precision_at_0_5m": precision_05m,
+        "accuracy_source": accuracy_source,
+        "coverage_ge2": coverage.get("fraction_observed_ge_2"),
+        "coverage_ge3": coverage.get("fraction_observed_ge_3"),
+        "coverage_ge5": coverage.get("fraction_observed_ge_5"),
+        "coverage_summary": coverage.get("summary"),
+        "scale_provenance": _scale_provenance(dense) if dense else None,
+        "total_seconds": dense.get("total_seconds"),
+        "stage_seconds": {
+            k: v for k, v in stage_seconds.items() if isinstance(v, (int, float))
+        },
+        "has_coverage": bool(coverage),
+    }
+    return stats
+
+
+def find_glb(run_dir: Path, glb_path: str | Path | None = None) -> tuple[Path, str]:
+    """Resolve the GLB to show. Returns (absolute path, viewer-relative URL)."""
+    if glb_path is not None:
+        candidate = Path(glb_path)
+        absolute = candidate if candidate.is_absolute() else (run_dir / candidate).resolve()
+        if not absolute.exists():
+            raise DataError(f"GLB not found: {glb_path}")
+        try:
+            relative = absolute.relative_to(run_dir.resolve()).as_posix()
+        except ValueError:
+            # Outside the run dir: the viewer can only load it via the file
+            # picker fallback, so report the path for the picker hint.
+            relative = absolute.name
+        return absolute, relative
+    for name in GLB_CANDIDATES:
+        candidate = run_dir / name
+        if candidate.exists():
+            return candidate, name
+    glbs = sorted(run_dir.glob("*.glb"))
+    if glbs:
+        return glbs[0], glbs[0].name
+    raise DataError(
+        f"No GLB model in {run_dir} (looked for {', '.join(GLB_CANDIDATES)}). "
+        "Re-run dense with --mesh, or pass glb_path explicitly."
+    )
+
+
+def generate_viewer_html(
+    run_dir: str | Path,
+    glb_path: str | Path | None = None,
+) -> Path:
+    """Generate ``viewer.html`` in ``run_dir`` showing the run's GLB + stats.
 
     Args:
-        run_dir: Path to reconstruction run directory containing map_3d.glb,
-                 orthomosaic.png, dsm_elevation.png, and reconstruction_summary.json.
-
-    Returns:
-        Path to generated viewer.html.
+        run_dir: run directory (or any directory holding a GLB + reports).
+        glb_path: explicit GLB to show; defaults to ``dense/mesh.glb``.
     """
-    summary_file = run_dir / "reconstruction_summary.json"
-    summary_data = {}
-    if summary_file.exists():
-        try:
-            summary_data = json.loads(summary_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    run_path = Path(run_dir).resolve()
+    _absolute_glb, glb_url = find_glb(run_path, glb_path)
+    stats = collect_viewer_stats(run_path)
 
-    num_points = summary_data.get("num_points3d", "N/A")
-    pts_display = f"{num_points:,}" if isinstance(num_points, (int, float)) else str(num_points)
-    num_frames = summary_data.get("num_registered_frames", "N/A")
-    reg_rate = summary_data.get("registration_rate", 0.0)
-    rep_err = summary_data.get("mean_reprojection_error_px", "N/A")
-    dataset_label = summary_data.get("dataset_label", "Single-Pass Drone Recon")
+    # Vendor Three.js next to the viewer so the page works fully offline.
+    assets_dest = run_path / "viewer_assets"
+    if VIEWER_ASSETS_DIR.exists():
+        shutil.copytree(VIEWER_ASSETS_DIR, assets_dest, dirs_exist_ok=True)
+
+    coverage_url = ""
+    coverage_path = run_path / "dense" / "coverage.json"
+    if coverage_path.exists() and stats["has_coverage"]:
+        coverage_url = "dense/coverage.json"
+
+    title = stats["dataset_label"] or "Single-pass drone reconstruction"
+    stage_rows = "".join(
+        f'<div class="stat"><span>{html.escape(name)}</span><b>{_fmt_seconds(value)}</b></div>'
+        for name, value in sorted(stats["stage_seconds"].items())
+    )
+
+    def row(label: str, value: str) -> str:
+        return f'<div class="stat"><span>{html.escape(label)}</span><b>{html.escape(value)}</b></div>'
+
+    def pct_row(label: str, fraction: object) -> str:
+        return row(label, _fmt_pct(fraction))
+
+    if stats["accuracy_source"]:
+        accuracy_note = (
+            "Measured against ground truth — "
+            f"{html.escape(str(stats['accuracy_source']))}."
+        )
+    else:
+        accuracy_note = (
+            "Accuracy is measured only when ground truth was supplied for "
+            "the run. Without it, the numbers above read \"not measured\" — "
+            "they are never estimated."
+        )
+
+    coverage_block = ""
+    if stats["has_coverage"]:
+        coverage_block = f"""
+        <div class="section">Coverage — what was actually seen</div>
+        {pct_row("Observed by ≥ 2 views", stats["coverage_ge2"])}
+        {pct_row("Observed by ≥ 3 views", stats["coverage_ge3"])}
+        {pct_row("Observed by ≥ 5 views", stats["coverage_ge5"])}
+        <p class="note">{html.escape(str(stats["coverage_summary"] or ""))}</p>"""
+    else:
+        coverage_block = """
+        <div class="section">Coverage — what was actually seen</div>
+        <p class="note">Not measured for this run — no coverage report found.
+        Unobserved surfaces are never filled in; they are simply absent.</p>"""
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>UAV-3D | Single-Pass 3D Digital Twin Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-  <style>
-    :root {{
-      --bg-dark: #0a0d14;
-      --bg-card: #121824;
-      --bg-card-hover: #192233;
-      --accent: #00d2ff;
-      --accent-glow: rgba(0, 210, 255, 0.25);
-      --accent-purple: #7928ca;
-      --text-main: #f0f4f8;
-      --text-muted: #8a99ad;
-      --border: #1e293b;
-      --success: #10b981;
-    }}
-    * {{
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    }}
-    body {{
-      background: var(--bg-dark);
-      color: var(--text-main);
-      overflow: hidden;
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
-    }}
-    header {{
-      background: rgba(18, 24, 36, 0.95);
-      backdrop-filter: blur(12px);
-      border-bottom: 1px solid var(--border);
-      padding: 12px 24px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      z-index: 100;
-    }}
-    .logo-group {{
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }}
-    .badge-sih {{
-      background: linear-gradient(135deg, #ff007a, #7928ca);
-      font-size: 11px;
-      font-weight: 700;
-      padding: 4px 8px;
-      border-radius: 6px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }}
-    .badge-ntro {{
-      background: rgba(0, 210, 255, 0.15);
-      border: 1px solid var(--accent);
-      color: var(--accent);
-      font-size: 11px;
-      font-weight: 600;
-      padding: 4px 8px;
-      border-radius: 6px;
-    }}
-    h1 {{
-      font-size: 18px;
-      font-weight: 700;
-      letter-spacing: -0.3px;
-    }}
-    .nav-tabs {{
-      display: flex;
-      gap: 8px;
-      background: rgba(10, 13, 20, 0.8);
-      padding: 4px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-    }}
-    .tab-btn {{
-      background: transparent;
-      border: none;
-      color: var(--text-muted);
-      padding: 8px 16px;
-      font-size: 13px;
-      font-weight: 600;
-      border-radius: 6px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }}
-    .tab-btn:hover {{
-      color: var(--text-main);
-      background: rgba(255, 255, 255, 0.05);
-    }}
-    .tab-btn.active {{
-      background: var(--accent);
-      color: #000;
-      box-shadow: 0 0 16px var(--accent-glow);
-    }}
-    #main-container {{
-      flex: 1;
-      position: relative;
-      overflow: hidden;
-    }}
-    .view-panel {{
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      display: none;
-    }}
-    .view-panel.active {{
-      display: block;
-    }}
-    #webgl-canvas {{
-      width: 100%;
-      height: 100%;
-      display: block;
-    }}
-    .image-viewer {{
-      width: 100%;
-      height: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #000;
-      position: relative;
-      overflow: hidden;
-    }}
-    .image-viewer img {{
-      max-width: 90%;
-      max-height: 90%;
-      object-fit: contain;
-      border-radius: 8px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8);
-      border: 1px solid var(--border);
-    }}
-    .hud-overlay {{
-      position: absolute;
-      top: 20px;
-      left: 20px;
-      background: rgba(18, 24, 36, 0.85);
-      backdrop-filter: blur(16px);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 16px 20px;
-      z-index: 50;
-      min-width: 260px;
-      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
-    }}
-    .hud-title {{
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      color: var(--accent);
-      margin-bottom: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }}
-    .hud-metric {{
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      font-size: 13px;
-      margin-bottom: 8px;
-      padding-bottom: 6px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    }}
-    .hud-metric:last-child {{
-      margin-bottom: 0;
-      padding-bottom: 0;
-      border-bottom: none;
-    }}
-    .hud-label {{
-      color: var(--text-muted);
-    }}
-    .hud-value {{
-      font-family: 'JetBrains Mono', monospace;
-      font-weight: 600;
-      color: #fff;
-    }}
-    .controls-panel {{
-      position: absolute;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(18, 24, 36, 0.85);
-      backdrop-filter: blur(16px);
-      border: 1px solid var(--border);
-      border-radius: 30px;
-      padding: 8px 16px;
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      z-index: 50;
-      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-    }}
-    .ctrl-btn {{
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      color: var(--text-main);
-      padding: 8px 14px;
-      font-size: 12px;
-      font-weight: 600;
-      border-radius: 20px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }}
-    .ctrl-btn:hover {{
-      background: var(--accent);
-      color: #000;
-    }}
-    .legend-overlay {{
-      position: absolute;
-      bottom: 24px;
-      right: 24px;
-      background: rgba(18, 24, 36, 0.85);
-      backdrop-filter: blur(16px);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px 18px;
-      z-index: 50;
-    }}
-    .legend-bar {{
-      width: 180px;
-      height: 14px;
-      border-radius: 4px;
-      margin: 8px 0;
-      background: linear-gradient(to right, #30123b, #4662d8, #1ae4b6, #a2fc3c, #faba39, #e23d00, #7a0403);
-    }}
-    .legend-labels {{
-      display: flex;
-      justify-content: space-between;
-      font-size: 11px;
-      font-family: 'JetBrains Mono', monospace;
-      color: var(--text-muted);
-    }}
-    #loading {{
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      font-size: 16px;
-      font-weight: 600;
-      color: var(--accent);
-      background: rgba(18, 24, 36, 0.95);
-      padding: 16px 28px;
-      border-radius: 12px;
-      border: 1px solid var(--border);
-      z-index: 200;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }}
-    .spinner {{
-      width: 20px;
-      height: 20px;
-      border: 3px solid rgba(0, 210, 255, 0.2);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }}
-    @keyframes spin {{
-      to {{ transform: rotate(360deg); }}
-    }}
-  </style>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UAV-3D viewer — {html.escape(str(title))}</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
+<style>
+  :root {{
+    --paper: #f4f2ee;
+    --card: #ffffff;
+    --ink: #1c1917;
+    --muted: #78716c;
+    --line: #e7e2d9;
+    --accent: #0f766e;
+    --accent-soft: #e6f2f0;
+  }}
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  html, body {{ height: 100%; }}
+  body {{
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    background: var(--paper);
+    color: var(--ink);
+    overflow: hidden;
+  }}
+  #viewport {{ position: fixed; inset: 0; }}
+  #viewport canvas {{ display: block; }}
+  header {{
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 20px;
+    background: rgba(244, 242, 238, 0.88);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }}
+  header h1 {{ font-size: 15px; font-weight: 600; letter-spacing: -0.2px; }}
+  .badge {{
+    font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid #c8e3df; border-radius: 20px; padding: 3px 9px;
+    white-space: nowrap;
+  }}
+  header .hint {{ margin-left: auto; font-size: 12px; color: var(--muted); }}
+  #panel {{
+    position: fixed; top: 64px; left: 16px; z-index: 10;
+    width: 308px; max-height: calc(100vh - 140px); overflow-y: auto;
+    background: var(--card);
+    border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: 0 8px 30px rgba(28, 25, 23, 0.08);
+    padding: 16px 18px;
+  }}
+  #panel h2 {{ font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 10px; }}
+  .section {{
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--accent);
+    margin: 16px 0 8px; padding-top: 12px; border-top: 1px solid var(--line);
+  }}
+  .section:first-of-type {{ margin-top: 0; padding-top: 0; border-top: none; }}
+  .stat {{
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+    font-size: 13px; padding: 4px 0;
+  }}
+  .stat span {{ color: var(--muted); }}
+  .stat b {{ font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace; font-weight: 600; font-size: 12px; text-align: right; }}
+  .note {{ font-size: 12px; line-height: 1.55; color: var(--muted); margin-top: 6px; }}
+  #controls {{
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10;
+    display: flex; gap: 8px; align-items: center;
+    background: var(--card); border: 1px solid var(--line); border-radius: 30px;
+    padding: 6px; box-shadow: 0 8px 30px rgba(28, 25, 23, 0.10);
+  }}
+  .btn {{
+    border: none; background: transparent; cursor: pointer;
+    font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--ink);
+    padding: 8px 14px; border-radius: 22px; transition: background 0.15s;
+  }}
+  .btn:hover {{ background: var(--paper); }}
+  .btn.active {{ background: var(--accent); color: #fff; }}
+  #legend {{
+    position: fixed; bottom: 20px; right: 20px; z-index: 10; display: none;
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 14px; font-size: 12px; box-shadow: 0 8px 30px rgba(28, 25, 23, 0.08);
+  }}
+  #legend.show {{ display: block; }}
+  #legend .sw {{ display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 7px; vertical-align: -1px; }}
+  #legend div {{ margin: 3px 0; }}
+  #status {{
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 20;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px 28px; text-align: center; max-width: 420px;
+    box-shadow: 0 12px 40px rgba(28, 25, 23, 0.12);
+  }}
+  #status h3 {{ font-size: 15px; margin-bottom: 8px; }}
+  #status p {{ font-size: 13px; color: var(--muted); line-height: 1.55; }}
+  #status .spin {{
+    width: 22px; height: 22px; margin: 0 auto 12px;
+    border: 3px solid var(--line); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+  #filepick {{ margin-top: 12px; font-size: 13px; }}
+  #filepick label {{
+    display: inline-block; cursor: pointer; font-weight: 600; color: #fff;
+    background: var(--accent); padding: 9px 16px; border-radius: 22px;
+  }}
+  #filepick input {{ display: none; }}
+  @media (max-width: 640px) {{
+    #panel {{ width: calc(100vw - 32px); max-height: 42vh; }}
+    header .hint {{ display: none; }}
+  }}
+</style>
+<script type="importmap">
+{{ "imports": {{
+  "three": "./viewer_assets/three.module.js",
+  "three/addons/": "./viewer_assets/jsm/"
+}} }}
+</script>
+<!-- Three.js {THREE_VERSION}, vendored locally (viewer_assets/) — no CDN. -->
 </head>
 <body>
-  <header>
-    <div class="logo-group">
-      <span class="badge-sih">SIH 2026</span>
-      <span class="badge-ntro">NTRO PS-26158</span>
-      <h1>Single-Pass Drone 3D Digital Twin</h1>
-    </div>
-    <div class="nav-tabs">
-      <button class="tab-btn active" onclick="switchTab('3d')">🌐 3D Digital Twin</button>
-      <button class="tab-btn" onclick="switchTab('ortho')">🗺️ 2D Orthomosaic</button>
-      <button class="tab-btn" onclick="switchTab('dsm')">🏔️ Elevation DSM</button>
-      <button class="tab-btn" onclick="switchTab('analytics')">📊 Mission Telemetry</button>
-    </div>
-  </header>
+<header>
+  <span class="badge">SIH 2026 · NTRO PS-26158</span>
+  <h1>{html.escape(str(title))}</h1>
+  <span class="hint">Drag to orbit · Scroll to zoom · Right-drag to pan</span>
+</header>
 
-  <div id="main-container">
-    <!-- 1. 3D WebGL View -->
-    <div id="view-3d" class="view-panel active">
-      <div id="loading"><div class="spinner"></div> Loading 3D Digital Twin Model...</div>
-      <div class="hud-overlay">
-        <div class="hud-title">Survey Telemetry <span style="color:var(--success)">● Metric Active</span></div>
-        <div class="hud-metric">
-          <span class="hud-label">Dataset / Scene</span>
-          <span class="hud-value">{dataset_label}</span>
-        </div>
-        <div class="hud-metric">
-          <span class="hud-label">Registered Frames</span>
-          <span class="hud-value">{num_frames} ({reg_rate * 100:.1f}%)</span>
-        </div>
-        <div class="hud-metric">
-          <span class="hud-label">Dense 3D Points</span>
-          <span class="hud-value">{pts_display}</span>
-        </div>
-        <div class="hud-metric">
-          <span class="hud-label">Reprojection Error</span>
-          <span class="hud-value">{rep_err if isinstance(rep_err, str) else f"{rep_err:.3f} px"}</span>
-        </div>
-        <div class="hud-metric">
-          <span class="hud-label">Occlusion Inpainting</span>
-          <span class="hud-value" style="color:var(--accent)">Active (Watertight)</span>
-        </div>
-      </div>
+<div id="viewport"></div>
 
-      <div class="controls-panel">
-        <button class="ctrl-btn" onclick="toggleWireframe()">Wireframe</button>
-        <button class="ctrl-btn" onclick="toggleAutoRotate()">Auto Orbit</button>
-        <button class="ctrl-btn" onclick="resetCamera()">Reset View</button>
-      </div>
+<aside id="panel">
+  <h2>Measured results</h2>
+  <div class="section">Reconstruction</div>
+  {row("Frames registered", stats["registration"] or "not measured")}
+  {row("Reprojection error", _fmt(stats["reprojection_px"], " px", 3))}
+  {row("Sparse points", f"{stats['sparse_points']:,}" if isinstance(stats["sparse_points"], int) else "not measured")}
+  {row("Dense points", f"{stats['dense_points']:,}" if isinstance(stats["dense_points"], int) else "not measured")}
+  {row("Mesh", f"{stats['mesh_vertices']:,} verts · {stats['mesh_faces']:,} faces" if isinstance(stats["mesh_vertices"], int) and isinstance(stats["mesh_faces"], int) else "not measured")}
+  {row("Depth valid", _fmt_pct(stats["depth_valid_fraction"]))}
+  <div class="section">Accuracy vs ground truth</div>
+  {row("Median error", _fmt(stats["median_error_m"], " m", 2))}
+  {pct_row("Precision @ 1.0 m", stats["precision_at_1m"])}
+  {pct_row("Precision @ 0.5 m", stats["precision_at_0_5m"])}
+  <p class="note">{accuracy_note}</p>
+  {coverage_block}
+  <div class="section">Scale</div>
+  <p class="note">{html.escape(stats["scale_provenance"] or "not measured")}</p>
+  <div class="section">Runtime</div>
+  {row("Total", _fmt_seconds(stats["total_seconds"]))}
+  {stage_rows}
+</aside>
 
-      <canvas id="webgl-canvas"></canvas>
-    </div>
+<div id="controls">
+  <button class="btn" id="btn-wire">Wireframe</button>
+  <button class="btn" id="btn-orbit">Auto orbit</button>
+  <button class="btn" id="btn-coverage" style="display:none">Coverage</button>
+  <button class="btn" id="btn-reset">Reset view</button>
+</div>
 
-    <!-- 2. Orthomosaic View -->
-    <div id="view-ortho" class="view-panel">
-      <div class="image-viewer">
-        <img src="./orthomosaic.png" alt="2D Orthomosaic Map" />
-        <div class="hud-overlay">
-          <div class="hud-title">2D Aerial Orthomosaic</div>
-          <p style="font-size:12px; color:var(--text-muted); line-height:1.5">
-            Orthorectified Nadir projection of survey flight corridor.<br>
-            Topographic terrain inpainted with zero occlusion shadow gaps.
-          </p>
-        </div>
-      </div>
-    </div>
+<div id="legend">
+  <div><b>Coverage — views that saw each surface</b></div>
+  <div><span class="sw" style="background:#0f766e"></span>Observed by ≥ 3 views</div>
+  <div><span class="sw" style="background:#e5a83b"></span>Observed by 1–2 views</div>
+  <div><span class="sw" style="background:#c9c2b8"></span>Unobserved — no data here</div>
+</div>
 
-    <!-- 3. DSM View -->
-    <div id="view-dsm" class="view-panel">
-      <div class="image-viewer">
-        <img src="./dsm_elevation.png" alt="Digital Surface Model" />
-        <div class="legend-overlay">
-          <div style="font-size:12px; font-weight:700; margin-bottom:4px">Digital Surface Model (DSM)</div>
-          <div class="legend-bar"></div>
-          <div class="legend-labels">
-            <span>0.0m (Ground)</span>
-            <span>+25.0m (Monument)</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 4. Analytics View -->
-    <div id="view-analytics" class="view-panel">
-      <div style="padding: 40px; max-width: 900px; margin: 0 auto; overflow-y: auto; height: 100%;">
-        <h2 style="font-size: 22px; margin-bottom: 16px; color: var(--accent)">Reconstruction Summary & Provenance</h2>
-        <pre style="background: var(--bg-card); border: 1px solid var(--border); padding: 20px; border-radius: 12px; color: #a5f3fc; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.6; overflow-x: auto;">{json.dumps(summary_data, indent=2)}</pre>
-      </div>
-    </div>
+<div id="status">
+  <div class="spin"></div>
+  <h3>Loading 3D model…</h3>
+  <p id="status-text">Fetching {html.escape(glb_url)}</p>
+  <div id="filepick" style="display:none">
+    <p style="margin-bottom:10px">The model could not be loaded automatically.
+    Serve this folder with <code>python -m http.server</code>, or pick the GLB file by hand:</p>
+    <label>Choose GLB file<input type="file" id="glb-file" accept=".glb,.gltf"></label>
   </div>
+</div>
 
-  <script>
-    // Tab switching
-    function switchTab(tabId) {{
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
-      event.target.classList.add('active');
-      document.getElementById('view-' + tabId).classList.add('active');
-      if (tabId === '3d') onWindowResize();
+<script type="module">
+import * as THREE from 'three';
+import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
+import {{ GLTFLoader }} from 'three/addons/loaders/GLTFLoader.js';
+
+const GLB_URL = {json.dumps(glb_url)};
+const COVERAGE_URL = {json.dumps(coverage_url)};
+const MODEL_NAME = {json.dumps(Path(glb_url).name)};
+
+const container = document.getElementById('viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf4f2ee);
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 10000);
+camera.position.set(10, -10, 8);
+const renderer = new THREE.WebGLRenderer({{ antialias: true }});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+container.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xd8d2c4, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(40, -30, 60);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xdfeaf2, 0.5);
+fill.position.set(-40, 40, -20);
+scene.add(fill);
+
+let model = null;
+let coverageCounts = null;
+let coverageOn = false;
+let savedColors = new Map(); // mesh -> original color attribute (or null)
+let homePos = null, homeTarget = null;
+
+function fitCamera(object) {{
+  const box = new THREE.Box3().setFromObject(object);
+  const center = box.getCenter(new THREE.Vector3());
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const dir = new THREE.Vector3(1, -0.9, 0.75).normalize();
+  const dist = sphere.radius * 2.1;
+  camera.position.copy(center).addScaledVector(dir, dist);
+  camera.near = Math.max(sphere.radius / 1000, 0.01);
+  camera.far = sphere.radius * 100;
+  camera.updateProjectionMatrix();
+  controls.target.copy(center);
+  controls.update();
+  homePos = camera.position.clone();
+  homeTarget = controls.target.clone();
+}}
+
+const COV_COLORS = [
+  new THREE.Color(0xc9c2b8), // 0 views — unobserved
+  new THREE.Color(0xe5a83b), // 1–2 views
+  new THREE.Color(0x0f766e), // >= 3 views
+];
+
+function applyCoverage(on) {{
+  if (!model || !coverageCounts) return;
+  model.traverse((child) => {{
+    if (!child.isMesh) return;
+    const geo = child.geometry;
+    const pos = geo.getAttribute('position');
+    if (pos.count !== coverageCounts.length) return; // counts belong to the first mesh
+    if (!savedColors.has(child)) savedColors.set(child, geo.getAttribute('color'));
+    if (on) {{
+      const colors = new Float32Array(pos.count * 3);
+      for (let i = 0; i < pos.count; i++) {{
+        const n = coverageCounts[i];
+        const c = n >= 3 ? COV_COLORS[2] : (n >= 1 ? COV_COLORS[1] : COV_COLORS[0]);
+        colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+      }}
+      geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      child.material.vertexColors = true;
+    }} else {{
+      const orig = savedColors.get(child);
+      if (orig) geo.setAttribute('color', orig);
+      else geo.deleteAttribute('color');
+      child.material.vertexColors = !!orig;
     }}
+    child.material.needsUpdate = true;
+  }});
+  document.getElementById('legend').classList.toggle('show', on);
+}}
 
-    // Three.js 3D Viewer Setup
-    const canvas = document.getElementById('webgl-canvas');
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0a0d14);
+function showStatus(title, text, showPicker) {{
+  const el = document.getElementById('status');
+  el.querySelector('h3').textContent = title;
+  document.getElementById('status-text').textContent = text;
+  el.querySelector('.spin').style.display = showPicker ? 'none' : 'block';
+  document.getElementById('filepick').style.display = showPicker ? 'block' : 'none';
+  el.style.display = 'block';
+}}
+function hideStatus() {{ document.getElementById('status').style.display = 'none'; }}
 
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.set(0, -60, 35);
-
-    const renderer = new THREE.WebGLRenderer({{ canvas, antialias: true, alpha: true }});
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-
-    const controls = new THREE.OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
-    controls.target.set(0, 0, 5);
-
-    // Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
-    scene.add(ambientLight);
-
-    const sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
-    sunLight.position.set(30, -50, 60);
-    scene.add(sunLight);
-
-    const fillLight = new THREE.DirectionalLight(0x80d0ff, 0.5);
-    fillLight.position.set(-30, 50, 20);
-    scene.add(fillLight);
-
-    // Grid Floor
-    const grid = new THREE.GridHelper(120, 60, 0x00d2ff, 0x1e293b);
-    grid.rotation.x = Math.PI / 2;
-    grid.position.z = -0.05;
-    scene.add(grid);
-
-    let loadedModel = null;
-    let isWireframe = false;
-
-    // Load GLTF / GLB Model
-    const loader = new THREE.GLTFLoader();
-    loader.load('./map_3d.glb', function(gltf) {{
-      loadedModel = gltf.scene;
-      
-      // Auto-center model
-      const box = new THREE.Box3().setFromObject(loadedModel);
-      const center = box.getCenter(new THREE.Vector3());
-      loadedModel.position.x -= center.x;
-      loadedModel.position.y -= center.y;
-      
-      scene.add(loadedModel);
-      document.getElementById('loading').style.display = 'none';
-      controls.target.set(0, 0, 5);
-      controls.update();
-    }}, undefined, function(error) {{
-      console.warn('GLB load fallback:', error);
-      document.getElementById('loading').innerHTML = '⚠️ GLB Preview Ready (Open in local HTTP server or view 2D maps)';
-    }});
-
-    function toggleWireframe() {{
-      if (!loadedModel) return;
-      isWireframe = !isWireframe;
-      loadedModel.traverse(function(child) {{
-        if (child.isMesh) child.material.wireframe = isWireframe;
-      }});
+async function loadCoverage() {{
+  if (!COVERAGE_URL) return;
+  try {{
+    const res = await fetch(COVERAGE_URL);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (Array.isArray(data.counts) && data.counts.length > 0) {{
+      coverageCounts = data.counts;
+      document.getElementById('btn-coverage').style.display = '';
     }}
+  }} catch (e) {{ console.warn('Coverage data unavailable:', e); }}
+}}
 
-    function toggleAutoRotate() {{
-      controls.autoRotate = !controls.autoRotate;
-      controls.autoRotateSpeed = 1.5;
-    }}
+const loader = new GLTFLoader();
+function loadModel(url, label) {{
+  loader.load(url, async (gltf) => {{
+    model = gltf.scene;
+    scene.add(model);
+    fitCamera(model);
+    hideStatus();
+    await loadCoverage();
+    window.__viewerModelLoaded = true;
+  }}, undefined, (err) => {{
+    console.error('GLB load failed:', err);
+    showStatus('Could not load the model',
+      `Tried ${{label}}. This usually means the page was opened as a file — browsers block model loading from file://.`,
+      true);
+    window.__viewerModelError = String(err && err.message || err);
+  }});
+}}
+loadModel(GLB_URL, GLB_URL);
 
-    function resetCamera() {{
-      camera.position.set(0, -60, 35);
-      controls.target.set(0, 0, 5);
-      controls.update();
-    }}
+document.getElementById('glb-file').addEventListener('change', (e) => {{
+  const file = e.target.files[0];
+  if (!file) return;
+  showStatus('Loading 3D model…', 'Reading ' + file.name, false);
+  loadModel(URL.createObjectURL(file), file.name);
+}});
 
-    function onWindowResize() {{
-      const container = document.getElementById('main-container');
-      camera.aspect = container.clientWidth / container.clientHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(container.clientWidth, container.clientHeight);
-    }}
-    window.addEventListener('resize', onWindowResize);
+document.getElementById('btn-wire').addEventListener('click', (e) => {{
+  if (!model) return;
+  const on = !e.target.classList.contains('active');
+  e.target.classList.toggle('active', on);
+  model.traverse((c) => {{ if (c.isMesh) c.material.wireframe = on; }});
+}});
+document.getElementById('btn-orbit').addEventListener('click', (e) => {{
+  controls.autoRotate = !controls.autoRotate;
+  controls.autoRotateSpeed = 1.0;
+  e.target.classList.toggle('active', controls.autoRotate);
+}});
+document.getElementById('btn-coverage').addEventListener('click', (e) => {{
+  coverageOn = !coverageOn;
+  e.target.classList.toggle('active', coverageOn);
+  applyCoverage(coverageOn);
+}});
+document.getElementById('btn-reset').addEventListener('click', () => {{
+  if (!homePos) return;
+  camera.position.copy(homePos);
+  controls.target.copy(homeTarget);
+  controls.update();
+}});
 
-    function animate() {{
-      requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
-    }}
-    animate();
-  </script>
+addEventListener('resize', () => {{
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}});
+(function animate() {{
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}})();
+</script>
 </body>
 </html>"""
 
-    viewer_path = run_dir / "viewer.html"
+    viewer_path = run_path / "viewer.html"
     viewer_path.write_text(html_content, encoding="utf-8")
-    logger.info(f"Generated interactive 3D WebGL Dashboard: {viewer_path}")
+    logger.info("Generated viewer: %s (model %s)", viewer_path, glb_url)
     return viewer_path

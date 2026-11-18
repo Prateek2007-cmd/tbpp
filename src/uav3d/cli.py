@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from uav3d import __version__
+from uav3d.calibration.focal import FocalSpec
 from uav3d.config import PipelineConfig, load_config
 from uav3d.dense.config import DenseConfig
 from uav3d.exceptions import DataError, Uav3dError
@@ -21,7 +22,7 @@ from uav3d.models.calibration_io import read_calibration, write_calibration
 from uav3d.models.frames import CameraCalibration
 from uav3d.models.keyframes import KeyframesFile
 from uav3d.models.poses import PosesFile
-from uav3d.sfm import SfmRunner, export_poses
+from uav3d.sfm import SfmRunner, apply_pose_prior_ba, export_poses
 from uav3d.sources.base import ImageSource
 from uav3d.sources.video import VideoFileSource
 from uav3d.sources.zurich import ZurichSequenceSource
@@ -30,6 +31,7 @@ from uav3d.validation import (
     compute_ate,
     generate_sp1_report,
     generate_validation_plots,
+    load_gps_residual_for_run,
 )
 
 console = Console()
@@ -60,6 +62,68 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_focal_arguments(parser: argparse.ArgumentParser) -> None:
+    """Attach focal-length flags (video runs) to a subcommand parser.
+
+    CLI flags override the same-named `sfm:` keys in the config file.
+    Priority: --focal-px > --exif-image > --focal-mm + sensor size > guess.
+    """
+    parser.add_argument(
+        "--focal-px",
+        type=float,
+        default=None,
+        help="Measured focal length in pixels from a pre-flight calibration capture (best evidence)",
+    )
+    parser.add_argument(
+        "--focal-mm",
+        type=float,
+        default=None,
+        help="Real lens focal length in millimetres (spec sheet / EXIF FocalLength). NEVER the 35mm-equivalent value.",
+    )
+    parser.add_argument(
+        "--sensor-width-mm",
+        type=float,
+        default=None,
+        help="Sensor width in millimetres for the video mode (with --focal-mm)",
+    )
+    parser.add_argument(
+        "--sensor-height-mm",
+        type=float,
+        default=None,
+        help="Sensor height in millimetres for the video mode (omit for square pixels)",
+    )
+    parser.add_argument(
+        "--sensor-format",
+        type=str,
+        default=None,
+        help="Sensor format key from the built-in table: '4/3', '1-inch', '1/1.3-inch'",
+    )
+    parser.add_argument(
+        "--exif-image",
+        type=str,
+        default=None,
+        help="Path to a still image captured with the same camera/zoom/focus as the flight; its EXIF FocalLength is used",
+    )
+
+
+def _focal_spec_from_config_and_args(cfg: PipelineConfig, args: argparse.Namespace) -> FocalSpec:
+    """Focal-length evidence for video runs: CLI flags override config values."""
+    def _pick(name: str):
+        cli_value = getattr(args, name, None)
+        return cli_value if cli_value is not None else getattr(cfg.sfm, name)
+
+    return FocalSpec(
+        focal_px=_pick("focal_px"),
+        focal_mm=_pick("focal_mm"),
+        sensor_width_mm=_pick("sensor_width_mm"),
+        sensor_height_mm=_pick("sensor_height_mm"),
+        sensor_format=_pick("sensor_format"),
+        exif_image=_pick("exif_image"),
+        cx=_pick("cx"),
+        cy=_pick("cy"),
+    )
+
+
 def _build_source(cfg: PipelineConfig, data_dir: str, args: argparse.Namespace) -> ImageSource:
     """Build and initialize ImageSource adapter from configuration or CLI arguments."""
     video_cli = getattr(args, "video", None)
@@ -73,6 +137,7 @@ def _build_source(cfg: PipelineConfig, data_dir: str, args: argparse.Namespace) 
             video_path=video_path,
             start_frame=start_frame,
             end_frame=end_frame,
+            focal=_focal_spec_from_config_and_args(cfg, args),
         )
 
     source_type = cfg.source.type.lower()
@@ -95,6 +160,7 @@ def _build_source(cfg: PipelineConfig, data_dir: str, args: argparse.Namespace) 
             video_path=video_path,
             start_frame=start_frame,
             end_frame=end_frame,
+            focal=_focal_spec_from_config_and_args(cfg, args),
         )
 
     raise Uav3dError(f"Unsupported source type '{source_type}'. Must be 'zurich' or 'video'.")
@@ -353,6 +419,7 @@ def _handle_sfm_command(args: argparse.Namespace) -> int:
                 height=actual_height,
                 params=_scale_calibration_params(calibration.model, calibration.params, sx, sy),
                 source=calibration.source,
+                provenance=calibration.provenance,
             )
         logger.info(f"Using camera calibration: {calibration.model} {calibration.params}")
 
@@ -378,6 +445,7 @@ def _handle_sfm_command(args: argparse.Namespace) -> int:
                 height=calibration.height,
                 params=[one_focal, *principal_point],
                 source=calibration.source,
+                provenance=calibration.provenance,
             )
             logger.info(
                 "Video run: SIMPLE_PINHOLE f=%.1f px (focal refinement %s)",
@@ -510,14 +578,50 @@ def _handle_sync_command(args: argparse.Namespace) -> int:
         poses_file = PosesFile.model_validate_json(poses_path.read_text(encoding="utf-8"))
         kf_file = KeyframesFile.model_validate_json(keyframes_path.read_text(encoding="utf-8"))
 
-        # 3. Load source telemetry
-        source = _build_source(cfg, data_dir, args)
+        # 3. Load source telemetry. --telemetry takes precedence: a .BIN
+        #    ArduPilot log, a DJI .SRT sidecar, a DJI AirData .xlsx export
+        #    (video runs) or a .csv GPS log is parsed by the synchronizer
+        #    itself. Without it, fall back to the source's embedded GPS
+        #    records (the Zurich path).
         raw_telemetry = None
-        if hasattr(source, "_gps_records"):
-            raw_telemetry = source._gps_records
+        telemetry_arg = getattr(args, "telemetry", None)
+        if telemetry_arg:
+            raw_telemetry = Path(telemetry_arg)
+            if not raw_telemetry.exists():
+                raise Uav3dError(f"Telemetry file not found: {raw_telemetry}")
+            sync_offset_us = getattr(args, "sync_offset_us", None)
+            sync_offset_s = getattr(args, "sync_offset_s", None)
+            if sync_offset_us is not None and sync_offset_s is not None:
+                raise Uav3dError(
+                    "Pass only one of --sync-offset-us and --sync-offset-s."
+                )
+            if sync_offset_s is not None or sync_offset_us is not None:
+                offset_us = (
+                    int(round(float(sync_offset_s) * 1_000_000))
+                    if sync_offset_s is not None
+                    else int(sync_offset_us)
+                )
+                # The coarse-offset flag is per-format: .BIN logs take the
+                # dataflash offset (seconds-scale, per-flight), .xlsx
+                # AirData exports take the fine-scan residual (the parser
+                # already anchors the first fix to video t=0).
+                if raw_telemetry.suffix.lower() == ".xlsx":
+                    cfg.sync.xlsx_sync_offset_us = offset_us
+                else:
+                    cfg.sync.dataflash_sync_offset_us = offset_us
+        else:
+            source = _build_source(cfg, data_dir, args)
+            if hasattr(source, "_gps_records"):
+                raw_telemetry = source._gps_records
 
         # 4. Perform synchronization
         sync_mode = getattr(args, "mode", "auto")
+        if sync_mode == "auto" and isinstance(raw_telemetry, Path):
+            # A .BIN log, .SRT sidecar or .xlsx export is always a video
+            # (Mode B) run: the Zurich path joins on image ids, which a
+            # flight log does not have.
+            if raw_telemetry.suffix.lower() in (".bin", ".log", ".srt", ".xlsx"):
+                sync_mode = "video"
         synchronizer = TelemetrySynchronizer(config=cfg.sync)
         tel_file, poses_enriched = synchronizer.sync(
             poses=poses_file,
@@ -562,6 +666,110 @@ def _handle_sync_command(args: argparse.Namespace) -> int:
         table.add_row("Telemetry JSON", str(telemetry_path))
         table.add_row("Enriched Poses JSON", str(poses_enriched_path))
 
+        console.print(table)
+    return 0
+
+
+def _handle_pose_prior_ba_command(args: argparse.Namespace) -> int:
+    """Execute GPS-constrained (pose-prior) bundle adjustment on a run.
+
+    Runs AFTER ``uav3d sync`` (needs telemetry.json) and BEFORE dense.
+    The wrapper (``uav3d.sfm.pose_prior.apply_pose_prior_ba``) owns the
+    whole step: backup, solve, model rewrite, poses.json re-export,
+    sparse_points.npz refresh, poses_enriched.json rebuild, and the
+    pose_prior_ba.json report. Intrinsics are hard-coded locked.
+    """
+    logger = setup_logging()
+    cfg = load_config(args.config if os.path.exists(args.config) else None)
+    data_dir = args.data_dir or os.environ.get("UAV3D_DATA_DIR") or cfg.data_dir
+
+    with timed_stage("pose-prior-ba", logger=logger):
+        if getattr(args, "run_dir", None):
+            run_dir = Path(args.run_dir).resolve()
+        else:
+            outputs_dir = Path(data_dir) / "outputs"
+            if not outputs_dir.exists():
+                raise Uav3dError(
+                    f"Outputs directory {outputs_dir} does not exist. "
+                    "Run 'uav3d sfm' and 'uav3d sync' first."
+                )
+            run_dirs = sorted(
+                [d for d in outputs_dir.iterdir() if d.is_dir() and d.name.startswith("run_")],
+                key=lambda p: p.name,
+            )
+            if not run_dirs:
+                raise Uav3dError(
+                    f"No run directories found in {outputs_dir}. "
+                    "Run 'uav3d sfm' and 'uav3d sync' first."
+                )
+            run_dir = run_dirs[-1]
+
+        logger.info(f"Target pose-prior-BA run directory: {run_dir}")
+        report = apply_pose_prior_ba(
+            run_dir,
+            sigma_m=getattr(args, "sigma", None) or 3.0,
+            holdout_fraction=(
+                getattr(args, "holdout_fraction", None)
+                if getattr(args, "holdout_fraction", None) is not None
+                else 0.10
+            ),
+            max_num_iterations=getattr(args, "max_iterations", None) or 250,
+        )
+
+        table = Table(
+            title=f"Pose-Prior Bundle Adjustment: [bold cyan]{run_dir.name}[/bold cyan]",
+            show_header=True,
+        )
+        table.add_column("Metric / Property", style="bold white", width=28)
+        table.add_column("Value", style="green")
+        before = report.before
+        after = report.after
+        table.add_row("Images / Priors / Holdout",
+                      f"{report.n_images} / {report.n_priors} / {report.n_holdout}"
+                      + (f" ({report.n_skipped} skipped, no fix)"
+                         if report.n_skipped else ""))
+        table.add_row("Prior sigma", f"{report.sigma_m:.2f} m (isotropic, Cartesian ENU)")
+        table.add_row(
+            "Reprojection (fresh)",
+            f"{before['reproj_px']:.4f} px -> {after['reproj_px']:.4f} px",
+        )
+        table.add_row(
+            "GPS Sim(3) median",
+            f"{before['gps_sim3_colmap_enu_m']['median_m']:.4f} m -> "
+            f"{after['gps_sim3_colmap_enu_m']['median_m']:.4f} m",
+        )
+        table.add_row(
+            "GPS Sim(3) scale",
+            f"{before['gps_sim3_colmap_enu_m']['scale_factor']:.4f} -> "
+            f"{after['gps_sim3_colmap_enu_m']['scale_factor']:.4f}",
+        )
+        table.add_row(
+            "Raw ENU median (no re-alignment)",
+            f"{after['raw_enu_colmap_m']['median_m']:.4f} m "
+            f"(RMSE {after['raw_enu_colmap_m']['rmse_m']:.4f} m)",
+        )
+        held = after.get("held_out")
+        if held:
+            table.add_row(
+                "Held-out median",
+                f"Sim(3) {held['sim3_global_median_m']:.4f} m / "
+                f"raw {held['raw_median_m']:.4f} m (n={held['n']})",
+            )
+        table.add_row("Focal unchanged", str(report.focal_unchanged))
+        table.add_row(
+            "Solver",
+            f"{report.solver['termination_type']}, "
+            f"{report.solver['num_residuals']} residuals "
+            f"(expected {report.solver['expected_residuals']})",
+        )
+        table.add_row(
+            "Wall time",
+            f"construct {report.wall_time_s['construct_s']:.1f} s, "
+            f"solve {report.wall_time_s['solve_s']:.1f} s, "
+            f"total {report.wall_time_s['total_s']:.1f} s",
+        )
+        table.add_row("Backup", report.backup_dir)
+        table.add_row("Report", str(run_dir / "pose_prior_ba.json"))
         console.print(table)
     return 0
 
@@ -627,6 +835,19 @@ def _handle_validate_command(args: argparse.Namespace) -> int:
             dataset_label=cfg.dataset_label,
         )
 
+        # 4b. GPS-trajectory-residual check (Phase 1): the metric check
+        # reprojection error cannot do. Runs when the run directory has
+        # telemetry.json (uav3d sync); advisory only — a missing or failed
+        # check never fails validation.
+        ate_report.gps_trajectory_residual = load_gps_residual_for_run(run_dir)
+        if ate_report.gps_trajectory_residual is not None:
+            logger.info(
+                "GPS trajectory residual: median %.3f m, p95 %.3f m over %d frames",
+                ate_report.gps_trajectory_residual.median_m,
+                ate_report.gps_trajectory_residual.p95_m,
+                ate_report.gps_trajectory_residual.num_matched_frames,
+            )
+
         # 5. Export ate_report.json
         ate_json_path = run_dir / "ate_report.json"
         ate_json_path.write_text(ate_report.model_dump_json(indent=2), encoding="utf-8")
@@ -666,6 +887,22 @@ def _handle_validate_command(args: argparse.Namespace) -> int:
         if m.mean_reprojection_error_px is not None:
             reproj_style = "bold green" if m.mean_reprojection_error_px <= 1.5 else "bold red"
             table.add_row("Reprojection Error (KPI <= 1.5px)", f"[{reproj_style}]{m.mean_reprojection_error_px:.3f} px[/{reproj_style}]")
+
+        gps = ate_report.gps_trajectory_residual
+        if gps is not None:
+            gps_style = "bold green" if gps.median_m <= 1.0 else "bold yellow"
+            table.add_row(
+                "GPS Trajectory Residual (med / p95)",
+                f"[{gps_style}]{gps.median_m:.3f} m / {gps.p95_m:.3f} m[/{gps_style}] "
+                f"({gps.num_matched_frames} frames, scale {gps.scale_factor:.4f} m/unit)",
+            )
+            if gps.median_m > 1.0:
+                console.print(
+                    "[yellow]Warning: GPS trajectory residual median is above 1 m. "
+                    "Reprojection error cannot see a focal-induced depth stretch — "
+                    "check the focal provenance in calibration.json before trusting "
+                    "this model's scale.[/yellow]"
+                )
 
         table.add_row("Validation Status", f"[bold green]{ate_report.status.upper()}[/bold green]")
         table.add_row("Report Artifacts", f"ate_report.json, SP1_REPORT.md, {', '.join(plots.values())}")
@@ -772,6 +1009,51 @@ def _handle_stub_command(command_name: str, args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_run_dir(args: argparse.Namespace, cfg: PipelineConfig) -> Path:
+    """Resolve --run-dir, or the latest run_ directory under data/outputs."""
+    if args.run_dir:
+        return Path(args.run_dir).resolve()
+    data_dir = args.data_dir or os.environ.get("UAV3D_DATA_DIR") or cfg.data_dir
+    outputs_dir = Path(data_dir) / "outputs"
+    if not outputs_dir.exists():
+        raise Uav3dError(f"Outputs directory {outputs_dir} does not exist.")
+    run_dirs = sorted(
+        [d for d in outputs_dir.iterdir() if d.is_dir() and d.name.startswith("run_")],
+        key=lambda p: p.name,
+    )
+    if not run_dirs:
+        raise Uav3dError(f"No run directories found in {outputs_dir}.")
+    return run_dirs[-1]
+
+
+def _handle_coverage_command(args: argparse.Namespace) -> int:
+    """Compute per-surface observation coverage for a finished dense run."""
+    from uav3d.coverage import coverage_report_for_run
+
+    logger = setup_logging()
+    cfg = load_config(args.config if os.path.exists(args.config) else None)
+    run_dir = _resolve_run_dir(args, cfg)
+    with timed_stage("coverage", logger=logger):
+        report = coverage_report_for_run(run_dir, tolerance=args.tolerance)
+    print(report["summary"])
+    print(f"Coverage report: {run_dir / 'dense' / 'coverage_report.json'}")
+    return 0
+
+
+def _handle_viewer_command(args: argparse.Namespace) -> int:
+    """Generate viewer.html for a run's GLB model."""
+    from uav3d.modeling.dashboard import generate_viewer_html
+
+    logger = setup_logging()
+    cfg = load_config(args.config if os.path.exists(args.config) else None)
+    run_dir = _resolve_run_dir(args, cfg)
+    with timed_stage("viewer", logger=logger):
+        viewer_path = generate_viewer_html(run_dir, glb_path=args.glb)
+    print(f"Viewer: {viewer_path}")
+    print(f"Serve it with: cd {run_dir} && python -m http.server 8000")
+    return 0
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create root argument parser with all pipeline subcommands."""
     parser = argparse.ArgumentParser(
@@ -798,6 +1080,7 @@ def create_parser() -> argparse.ArgumentParser:
         help="Inspect raw video/sequence metadata, calibration, and timestamps",
     )
     _add_common_arguments(inspect_parser)
+    _add_focal_arguments(inspect_parser)
 
     # 2. keyframes
     keyframes_parser = subparsers.add_parser(
@@ -805,6 +1088,7 @@ def create_parser() -> argparse.ArgumentParser:
         help="Extract and select sharp keyframes from ingested video/images",
     )
     _add_common_arguments(keyframes_parser)
+    _add_focal_arguments(keyframes_parser)
     keyframes_parser.add_argument(
         "--start-frame",
         type=int,
@@ -863,8 +1147,76 @@ def create_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Telemetry synchronization mode (auto, zurich, or video)",
     )
+    sync_parser.add_argument(
+        "--telemetry",
+        type=str,
+        default=None,
+        help=(
+            "Telemetry file to sync against the run's poses: an ArduPilot "
+            "DataFlash .BIN log (video runs — parsed with the coarse sync "
+            "offset below), a DJI .SRT subtitle sidecar (times are already "
+            "video times, no offset needed), a DJI AirData .xlsx export "
+            "(first fix anchors video t=0; the offset below is the fine-scan "
+            "residual), or a .csv GPS log. Without it, sync uses the source "
+            "dataset's embedded GPS records (Zurich path)."
+        ),
+    )
+    sync_parser.add_argument(
+        "--sync-offset-us",
+        type=int,
+        default=None,
+        help=(
+            "Coarse video↔log sync offset in microseconds for .BIN telemetry "
+            "(video start minus first GPS fix). The offset is per-flight — "
+            "without this flag (or the config value) it is read from the "
+            "flight's campaign.json next to the .BIN, and the sync fails "
+            "loudly if neither is available. PinPoint flight01: 1,200,000 µs; "
+            "flight02: 49,400,000 µs."
+        ),
+    )
+    sync_parser.add_argument(
+        "--sync-offset-s",
+        type=float,
+        default=None,
+        help=(
+            "Same as --sync-offset-us, in seconds (e.g. 49.4 for PinPoint "
+            "flight02). Pass only one of the two flags."
+        ),
+    )
 
-    # 5. validate
+    # 5. pose-prior-ba (Stage 1: GPS-constrained bundle adjustment)
+    ppba_parser = subparsers.add_parser(
+        "pose-prior-ba",
+        help="GPS-constrained bundle adjustment on a synced run "
+             "(after sfm + sync, before dense)",
+    )
+    _add_common_arguments(ppba_parser)
+    ppba_parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Explicit run directory containing colmap/sparse/0 and telemetry.json (defaults to latest run)",
+    )
+    ppba_parser.add_argument(
+        "--sigma",
+        type=float,
+        default=3.0,
+        help="Isotropic GPS prior sigma in metres (default 3.0)",
+    )
+    ppba_parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.10,
+        help="Fraction of GPS fixes held out of the prior set, spread along the strip (default 0.10 = every 10th image)",
+    )
+    ppba_parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=250,
+        help="Ceres iteration cap (default 250; the 100 default was hit by every Stage 0 spike run)",
+    )
+
+    # 6. validate
     validate_parser = subparsers.add_parser(
         "validate",
         help="Evaluate estimated camera poses against ground truth (ATE metric)",
@@ -883,7 +1235,7 @@ def create_parser() -> argparse.ArgumentParser:
         help="Path to GroundTruthAGL.csv (defaults to dataset location)",
     )
 
-    # 6. dense
+    # 7. dense
     dense_parser = subparsers.add_parser(
         "dense",
         help="CPU multi-view-stereo dense reconstruction (depth, point cloud, mesh)",
@@ -963,6 +1315,44 @@ def create_parser() -> argparse.ArgumentParser:
         help="Fast preset: 960 px width, every 2nd reference view, 64 planes",
     )
 
+    # 8. coverage (Phase 4: per-surface observation reporting)
+    coverage_parser = subparsers.add_parser(
+        "coverage",
+        help="Measure per-surface observation coverage from a finished dense run",
+    )
+    _add_common_arguments(coverage_parser)
+    coverage_parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Run directory containing dense/depth_filtered and dense/mesh.glb (defaults to latest)",
+    )
+    coverage_parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=None,
+        help="Depth-agreement tolerance in SfM units (default: 3x the dense depth sigma)",
+    )
+
+    # 9. viewer (Phase 4: standalone 3D viewer for a run)
+    viewer_parser = subparsers.add_parser(
+        "viewer",
+        help="Generate viewer.html for a run's GLB model (serve the run dir over HTTP to view it)",
+    )
+    _add_common_arguments(viewer_parser)
+    viewer_parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Run directory (defaults to latest)",
+    )
+    viewer_parser.add_argument(
+        "--glb",
+        type=str,
+        default=None,
+        help="Explicit GLB to show (default: dense/mesh.glb in the run dir)",
+    )
+
     return parser
 
 
@@ -983,10 +1373,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _handle_sfm_command(args)
         if args.command == "sync":
             return _handle_sync_command(args)
+        if args.command == "pose-prior-ba":
+            return _handle_pose_prior_ba_command(args)
         if args.command == "validate":
             return _handle_validate_command(args)
         if args.command == "dense":
             return _handle_dense_command(args)
+        if args.command == "coverage":
+            return _handle_coverage_command(args)
+        if args.command == "viewer":
+            return _handle_viewer_command(args)
         if args.command in SUBCOMMANDS:
             return _handle_stub_command(args.command, args)
         parser.print_help()

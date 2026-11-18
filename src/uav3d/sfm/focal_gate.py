@@ -78,7 +78,7 @@ class FocalDriftResult:
 def check_focal_drift(
     prior_focal_px: float,
     solved_focal_px_value: float,
-    max_rel_drift: float = 0.10,
+    max_rel_drift: float = 0.05,
 ) -> FocalDriftResult:
     """Compare a solved focal length against its prior and apply the gate.
 

@@ -15,11 +15,34 @@ dependencies = [
     "pydantic>=2",
     "pyyaml",
     "pyproj",
+    # ArduPilot DataFlash (.BIN) telemetry parser (telemetry/dataflash_parser.py).
+    "pymavlink",
+    # DJI AirData (.xlsx) telemetry parser (telemetry/xlsx_parser.py).
+    "openpyxl",
     "rich",
     "matplotlib",
+    # Pure-Python mesh I/O: modeling/texturing.py imports it at module level
+    # and scripts/eval_city_model.py needs it. Lightweight, so it stays core.
+    "trimesh",
 ]
 
 [project.optional-dependencies]
+# onnxruntime is NOT a core dependency: only the opt-in monocular depth
+# prior (uav3d dense --prior, default off) needs it, its checkpoint is not
+# shipped with the repo, and the prior failed its promotion gate
+# (docs/CITY_MODEL_EVAL.md) — it stays opt-in. dense/prior.py imports
+# onnxruntime lazily and raises a clear install hint when the prior is
+# actually constructed without it.
+prior = [
+    "onnxruntime",
+]
+# open3d is heavy and only needed by the modeling stage
+# (modeling/completion.py, modeling/lod2.py) and the city-model scripts
+# (scripts/colorize_city_model.py, build_city_model.py, render_preview.py)
+# — not by the core ingest → keyframes → sfm → dense pipeline.
+modeling = [
+    "open3d",
+]
 dev = [
     "pytest",
     "ruff",

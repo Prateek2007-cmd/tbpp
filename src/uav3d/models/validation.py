@@ -39,6 +39,28 @@ class AteMetrics(BaseModel):
     mean_reprojection_error_px: float | None = Field(default=None, description="Mean reprojection error carried from poses.json")
 
 
+class GpsResidualMetrics(BaseModel):
+    """GPS-trajectory-residual check: SfM camera centres vs GPS, in metres.
+
+    The metric check reprojection error cannot do: a focal-induced depth
+    stretch is anisotropic, so no Sim(3) alignment can absorb it and it
+    shows up here as a large residual even when reprojection error is low.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rmse_m: float = Field(..., description="RMSE of GPS residuals after Sim(3) alignment, in metres", ge=0.0)
+    median_m: float = Field(..., description="Median GPS residual in metres", ge=0.0)
+    p95_m: float = Field(..., description="95th percentile GPS residual in metres", ge=0.0)
+    max_m: float = Field(..., description="Maximum GPS residual in metres", ge=0.0)
+    scale_factor: float = Field(..., description="Recovered Sim(3) scale factor s from SfM units to GPS metres", gt=0.0)
+    num_matched_frames: int = Field(..., description="Frames with both a registered pose and a GPS fix", ge=0)
+    fit_condition: str = Field(
+        ...,
+        description="Condition check on GPS trajectory geometry: 'well_conditioned' or 'weak_flightline_geometry'",
+    )
+
+
 class AteReport(BaseModel):
     """File-level serialization schema for ate_report.json."""
 
@@ -51,6 +73,10 @@ class AteReport(BaseModel):
     )
     status: str = Field(default="completed", description="Validation execution status")
     metrics: AteMetrics = Field(..., description="Summary ATE metrics")
+    gps_trajectory_residual: GpsResidualMetrics | None = Field(
+        default=None,
+        description="GPS-trajectory-residual check (SfM centres vs GPS), when telemetry.json was available. None when the run has no GPS telemetry.",
+    )
     alignment_transform: dict[str, Any] = Field(
         ...,
         description="Optimal Sim(3) alignment transform parameters (scale, rotation, translation)",

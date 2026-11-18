@@ -86,6 +86,7 @@ def write_glb(
     double_sided: bool = True,
     roughness: float = 0.92,
     metallic: float = 0.0,
+    extras: dict | None = None,
 ) -> Path:
     """Write a single-mesh GLB with normals, vertex colours and a real material.
 
@@ -102,6 +103,9 @@ def write_glb(
         roughness: PBR roughness. High by default: the surface is diffuse rock,
             concrete and foliage, not a specular material.
         metallic: PBR metalness. Zero for captured surfaces.
+        extras: Optional JSON-serialisable metadata written to the glTF
+            asset's ``extras`` (e.g. units, metric scale, CRS/origin for a
+            georeferenced model). Recorded as-is; nothing here is rendered.
 
     Returns:
         The written path.
@@ -207,8 +211,12 @@ def write_glb(
     if colors is not None:
         material["extras"] = {"vertexColors": True}
 
+    asset: dict = {"version": "2.0", "generator": "uav3d.dense.glb_export"}
+    if extras:
+        asset["extras"] = dict(extras)
+
     gltf = {
-        "asset": {"version": "2.0", "generator": "uav3d.dense.glb_export"},
+        "asset": asset,
         "scene": 0,
         "scenes": [{"nodes": [0]}],
         "nodes": [{"name": name, "mesh": 0}],

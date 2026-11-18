@@ -158,3 +158,27 @@ def test_empty_face_array_still_writes_a_file(tmp_path):
     out = write_glb(tmp_path / "empty.glb", vertices, np.zeros((0, 3), dtype=np.int64), name="e")
     gltf, _ = _read_glb(out)
     assert gltf["meshes"][0]["primitives"][0]["attributes"]["POSITION"] == 0
+
+
+def test_asset_extras_carry_georef_metadata(tmp_path, cube):
+    """Phase 2: units/scale/CRS metadata rides in the GLB asset extras."""
+    vertices, faces = cube
+    extras = {
+        "uav3d": {
+            "units": "metres",
+            "frame": "ENU",
+            "scale_m_per_unit": 3.5,
+            "scale_source": "gnss",
+            "georef": {"crs": "EPSG:32630", "origin": {"lat": 41.77}},
+        }
+    }
+    out = write_glb(tmp_path / "meta.glb", vertices, faces, name="m", extras=extras)
+    gltf, _ = _read_glb(out)
+    assert gltf["asset"]["extras"] == extras
+
+
+def test_no_extras_means_no_extras_key(tmp_path, cube):
+    vertices, faces = cube
+    out = write_glb(tmp_path / "plain.glb", vertices, faces, name="m")
+    gltf, _ = _read_glb(out)
+    assert "extras" not in gltf["asset"]

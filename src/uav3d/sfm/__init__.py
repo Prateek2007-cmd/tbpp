@@ -8,6 +8,16 @@ from uav3d.sfm.colmap_compat import (
     quaternion_to_rotation_matrix,
 )
 from uav3d.sfm.colmap_export import export_poses
+from uav3d.sfm.pose_prior import (
+    DEFAULT_HOLDOUT_FRACTION,
+    DEFAULT_MAX_NUM_ITERATIONS,
+    DEFAULT_SIGMA_M,
+    PosePriorBaReport,
+    apply_pose_prior_ba,
+    build_pose_priors,
+    latlon_to_enu_colmap,
+    select_holdout_indices,
+)
 from uav3d.sfm.runner import SfmRunResult, SfmRunner, SfmStageProfile
 
 __all__ = [
@@ -20,4 +30,12 @@ __all__ = [
     "get_pose_components",
     "is_image_registered",
     "quaternion_to_rotation_matrix",
+    "PosePriorBaReport",
+    "apply_pose_prior_ba",
+    "build_pose_priors",
+    "latlon_to_enu_colmap",
+    "select_holdout_indices",
+    "DEFAULT_SIGMA_M",
+    "DEFAULT_HOLDOUT_FRACTION",
+    "DEFAULT_MAX_NUM_ITERATIONS",
 ]
